@@ -14,6 +14,8 @@ log() {
 
 log "Starting prefill in background (TEST_NAME=$TEST_NAME, BATCH_SIZE=$BATCH_SIZE)..."
 source /root/autodl-tmp/py_venv/vllm2/bin/activate
+# set -m 使后台任务独立成进程组，stop 时可用 kill -9 -$PID 杀整组（含子进程 vLLM）
+set -m
 nohup bash "$RUN_SCRIPT" \
     >> "$LOG_DIR/prefill.log" 2>&1 &
 echo $! > "$PID_FILE"

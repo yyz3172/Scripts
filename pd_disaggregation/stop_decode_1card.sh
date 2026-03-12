@@ -18,13 +18,17 @@ if ! kill -0 "$PID" 2>/dev/null; then
     exit 0
 fi
 
-log "Sending SIGTERM to decode (PID $PID), waiting for exit..."
-kill "$PID"
+# 优先杀进程组（start 里 set -m 时 PID 为组长）；否则杀进程树，避免留下孤儿 vLLM
+log "Killing decode (PID $PID)..."
+kill -9 -"$PID" 2>/dev/null
+if kill -0 "$PID" 2>/dev/null; then
+    while pkill -9 -P "$PID" 2>/dev/null; do sleep 0.5; done
+    kill -9 "$PID" 2>/dev/null
+fi
 i=0
 while kill -0 "$PID" 2>/dev/null; do
     if [ $i -ge 30 ]; then
-        log "Process did not exit in 30s, sending SIGKILL..."
-        kill -9 "$PID"
+        log "Process did not exit in 30s, giving up."
         break
     fi
     sleep 1

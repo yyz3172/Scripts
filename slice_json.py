@@ -18,8 +18,8 @@ def _is_valid_item(obj) -> bool:
     n = len(conv)
     if n == 0 or (n % 2) != 0:
         return False
-    if n < 28 or n > 60:
-        return False
+    # if n < 28 or n > 60:
+    #     return False
     # 要求每对消息: (human, gpt)
     for i in range(0, n, 2):
         a = conv[i]
@@ -27,8 +27,10 @@ def _is_valid_item(obj) -> bool:
         if not isinstance(a, dict) or not isinstance(b, dict):
             return False
         if a.get("from") != "human":
+            print("human not found")
             return False
         if b.get("from") != "gpt":
+            print("gpt not found")
             return False
     return True
 

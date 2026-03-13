@@ -3,7 +3,7 @@
 TEST_NAME="${1:?Usage: $0 <test_name>}"
 BATCH_SIZE="${2:?Usage: $0 <batch_size>}"
 
-RUN_SCRIPT=/root/autodl-tmp/yyz/Qwen3-8B/run_decode_1card.sh
+RUN_SCRIPT=/root/autodl-tmp/yyz/Qwen3-32B/run_decode_2cards.sh
 LOG_DIR="/root/autodl-tmp/yyz/log/${TEST_NAME}/batch_${BATCH_SIZE}"
 mkdir -p "$LOG_DIR"
 PID_FILE="/tmp/vllm_decode.pid"

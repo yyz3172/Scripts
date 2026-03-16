@@ -1,17 +1,18 @@
 """
-Engine 日志解析与绘图
-从 prefill.log / decode.log 中解析 vLLM Engine 指标行，输出 Excel：原始数据 + 折线图。
+vLLM Engine 指标解析与绘图
+从 prefill.log / decode.log 中解析 vLLM Engine 指标（throughput、Running/Waiting、KV cache 等），
+输出 Excel：原始数据 + 折线图。
 
-单目录模式：输入目录下直接含 prefill.log / decode.log 时，在该目录生成 engine_log_analysis.xlsx
+单目录模式：输入目录下直接含 prefill.log / decode.log 时，在该目录生成 vllm_engine_metrics_analysis.xlsx
 （原始数据表 + Throughput / Running_Waiting / Cache 三类图，每类「原始 + 采样」两张图并排）。
 
 批量模式：输入目录下无日志、仅有子目录（如 batch_50, batch_60）时，每个子目录生成各自的
-engine_log_analysis.xlsx，并在父目录生成 engine_log_sweep.xlsx（7 指标 × prefill+decode，
+vllm_engine_metrics_analysis.xlsx，并在父目录生成 vllm_engine_metrics_sweep.xlsx（7 指标 × prefill+decode，
 每 sheet 横轴 index、多子目录折线对比）。
 
 用法：
-  python engine_log_plot.py <log_dir> [--output 文件名.xlsx]
-  # --output 仅指定文件名，输出路径始终在 prefill.log 同级；批量时汇总表固定为 engine_log_sweep.xlsx
+  python vllm_engine_metrics_plot.py <log_dir> [--output 文件名.xlsx]
+  # --output 仅指定文件名，输出路径始终在 prefill.log 同级；批量时汇总表固定为 vllm_engine_metrics_sweep.xlsx
 """
 
 import re
@@ -250,12 +251,21 @@ def _downsample_indices(n, max_pts):
 
 def _write_data_block_aligned(ws, row0, headers, columns_subset, aligned_rows):
     """
-    在 sheet 的 row0 起写入一块表头+数据；aligned_rows = [(time_label, p_row, d_row), ...]。
+    在 sheet 的 row0 起写入一块表头+数据；
+    aligned_rows = [(time_label, p_row, d_row), ...]。
+    表头约定：
+      - 第1列: index
+      - 第2列: prefill_time
+      - 第3列: decode_time
+      - 之后成对出现: prefill_xx, decode_xx ...
     仅 FORWARD_FILL_COLUMNS 中的指标在缺侧时做前向填充；其余指标该侧留空。
     """
     n_rows = len(aligned_rows)
-    time_col = 1
-    data_start_col = 2
+    index_col = 1
+    prefill_time_col = 2
+    decode_time_col = 3
+    data_start_col = 4
+
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=row0, column=c, value=h)
         cell.font = HDR_FONT
@@ -267,8 +277,17 @@ def _write_data_block_aligned(ws, row0, headers, columns_subset, aligned_rows):
     last_d = {col: None for col in columns_subset if col in FORWARD_FILL_COLUMNS}
     for ri, (time_label, p_row, d_row) in enumerate(aligned_rows):
         sheet_row = row0 + 1 + ri
-        cell = ws.cell(row=sheet_row, column=time_col, value=time_label)
-        cell.alignment = CENTER
+        # index
+        ws.cell(row=sheet_row, column=index_col, value=ri)
+        ws.cell(row=sheet_row, column=index_col).alignment = CENTER
+        # time columns：有数据则用该侧 timestamp，无数据则留空
+        pre_ts = p_row.get("timestamp") if p_row else None
+        dec_ts = d_row.get("timestamp") if d_row else None
+        ws.cell(row=sheet_row, column=prefill_time_col, value=pre_ts if pre_ts else "")
+        ws.cell(row=sheet_row, column=prefill_time_col).alignment = CENTER
+        ws.cell(row=sheet_row, column=decode_time_col, value=dec_ts if dec_ts else "")
+        ws.cell(row=sheet_row, column=decode_time_col).alignment = CENTER
+
         for ci, col in enumerate(columns_subset):
             prefill_col = data_start_col + ci * 2
             decode_col = data_start_col + ci * 2 + 1
@@ -293,7 +312,8 @@ def _write_data_block_aligned(ws, row0, headers, columns_subset, aligned_rows):
 
 def _build_line_chart(ws, row0, n_rows, columns_subset, titles, chart_title, num_metrics, palette):
     """根据已有数据区 (row0 表头, row0+1..row0+n_rows 数据) 建折线图并返回 chart。"""
-    data_start_col = 2
+    # 数据从第4列开始（1=index, 2=prefill_time, 3=decode_time）
+    data_start_col = 4
     chart = LineChart()
     chart.title = chart_title
     chart.style = 10
@@ -336,7 +356,7 @@ def _chart_data_sheet(wb, prefill_rows, decode_rows, name, columns_subset, title
     aligned_sampled = [aligned[i] for i in indices_sampled]
     n_sampled = len(aligned_sampled)
 
-    headers = ["time"]
+    headers = ["index", "prefill_time", "decode_time"]
     for col in columns_subset:
         headers.append(f"prefill_{col}")
         headers.append(f"decode_{col}")
@@ -361,7 +381,7 @@ def _chart_data_sheet(wb, prefill_rows, decode_rows, name, columns_subset, title
     chart2 = _build_line_chart(ws, row0_sampled, n_sampled, columns_subset, titles, f"{name} (采样)", num_metrics, palette)
     ws.add_chart(chart2, CHART2_ANCHOR)
     n_cols = len(headers)
-    _set_sheet_column_widths(ws, [COL_WIDTH_TIME] + [COL_WIDTH_DATA] * (n_cols - 1))
+    _set_sheet_column_widths(ws, [COL_WIDTH_INDEX, COL_WIDTH_TIME, COL_WIDTH_TIME] + [COL_WIDTH_DATA] * (n_cols - 3))
     return ws
 
 
@@ -466,13 +486,17 @@ def _sanitize_sheet_title(title):
     return title[:31] if len(title) > 31 else title
 
 
-def _write_sweep_data_block(ws, row0, batch_series, batch_entries, indices):
-    """写入一块汇总数据：index + 各 batch 列，仅 indices 中的行。"""
+def _write_sweep_data_block(ws, row0, batch_series, batch_entries, indices, timestamps=None):
+    """写入一块汇总数据：index + 时间戳（可选）+ 各 batch 列，仅 indices 中的行。"""
     n_batches = len(batch_entries)
+    off = 2 if timestamps is not None else 1  # 数据列起始列（index 占 1，时间戳可选占 1）
+    n_cols = off + n_batches
     ws.cell(row=row0, column=1, value="index")
-    for c, (name, _, _) in enumerate(batch_entries, 2):
-        ws.cell(row=row0, column=c, value=name)
-    for c in range(1, n_batches + 2):
+    if timestamps is not None:
+        ws.cell(row=row0, column=2, value="时间戳")
+    for bi, (name, _, _) in enumerate(batch_entries):
+        ws.cell(row=row0, column=off + 1 + bi, value=name)
+    for c in range(1, n_cols + 1):
         cell = ws.cell(row=row0, column=c)
         cell.font = HDR_FONT
         cell.fill = HDR_FILL
@@ -481,16 +505,20 @@ def _write_sweep_data_block(ws, row0, batch_series, batch_entries, indices):
     for ri, idx in enumerate(indices):
         sheet_row = row0 + 1 + ri
         ws.cell(row=sheet_row, column=1, value=idx)
+        if timestamps is not None:
+            ts = timestamps[idx] if idx < len(timestamps) else ""
+            ws.cell(row=sheet_row, column=2, value=ts)
         for bi, series in enumerate(batch_series):
             val = series[idx] if idx < len(series) else None
-            ws.cell(row=sheet_row, column=2 + bi, value=val if val is not None else "")
-        for c in range(1, n_batches + 2):
+            ws.cell(row=sheet_row, column=off + 1 + bi, value=val if val is not None else "")
+        for c in range(1, n_cols + 1):
             ws.cell(row=sheet_row, column=c).alignment = CENTER
 
 
-def _add_sweep_chart(ws, row0, n_rows, batch_entries, title, palette):
-    """在 ws 上根据 row0 起的数据区添加一张汇总折线图。"""
+def _add_sweep_chart(ws, row0, n_rows, batch_entries, title, palette, has_timestamp_col=True):
+    """在 ws 上根据 row0 起的数据区添加一张汇总折线图。has_timestamp_col 为 True 时第 2 列为时间戳，数据从第 3 列起。"""
     n_batches = len(batch_entries)
+    data_start_col = 3 if has_timestamp_col else 2
     chart = LineChart()
     chart.title = title
     chart.style = 10
@@ -500,7 +528,7 @@ def _add_sweep_chart(ws, row0, n_rows, batch_entries, title, palette):
     cats = Reference(ws, min_col=1, min_row=row0 + 1, max_row=row0 + n_rows)
     chart.set_categories(cats)
     for bi in range(n_batches):
-        ref = Reference(ws, min_col=2 + bi, min_row=row0, max_row=row0 + n_rows)
+        ref = Reference(ws, min_col=data_start_col + bi, min_row=row0, max_row=row0 + n_rows)
         chart.add_data(ref, titles_from_data=True)
         chart.series[-1].tx = SeriesLabel(v=batch_entries[bi][0])
         chart.series[-1].smooth = True
@@ -530,29 +558,33 @@ def build_sweep_excel(log_dir, batch_entries, sweep_filename):
             sheet_title = _sanitize_sheet_title(f"{title_base}_{source}")
             ws = wb.create_sheet(sheet_title, len(wb.sheetnames))
             batch_series = []
+            first_batch_rows = None
             for _name, prefill_rows, decode_rows in batch_entries:
                 rows = prefill_rows if source == "prefill" else decode_rows
+                if first_batch_rows is None:
+                    first_batch_rows = rows
                 batch_series.append([r.get(col) for r in rows] if rows else [])
             n_points = max(len(s) for s in batch_series) if batch_series else 0
             if n_points == 0:
                 continue
+            timestamps = [first_batch_rows[i]["timestamp"] if first_batch_rows and i < len(first_batch_rows) else "" for i in range(n_points)]
             n_batches = len(batch_entries)
             indices_full = list(range(n_points))
             indices_sampled = _downsample_indices(n_points, MAX_CHART_POINTS)
             n_sampled = len(indices_sampled)
 
             row0_full = CHART_SHEET_DATA_START_ROW
-            _write_sweep_data_block(ws, row0_full, batch_series, batch_entries, indices_full)
+            _write_sweep_data_block(ws, row0_full, batch_series, batch_entries, indices_full, timestamps=timestamps)
             row0_sampled = row0_full + n_points + 2
-            _write_sweep_data_block(ws, row0_sampled, batch_series, batch_entries, indices_sampled)
+            _write_sweep_data_block(ws, row0_sampled, batch_series, batch_entries, indices_sampled, timestamps=timestamps)
 
             palette = _chart_palette(n_batches)
-            chart1 = _add_sweep_chart(ws, row0_full, n_points, batch_entries, f"{title_base} ({source}) 原始数据", palette)
+            chart1 = _add_sweep_chart(ws, row0_full, n_points, batch_entries, f"{title_base} ({source}) 原始数据", palette, has_timestamp_col=True)
             ws.add_chart(chart1, "A1")
-            chart2 = _add_sweep_chart(ws, row0_sampled, n_sampled, batch_entries, f"{title_base} ({source}) 采样", palette)
+            chart2 = _add_sweep_chart(ws, row0_sampled, n_sampled, batch_entries, f"{title_base} ({source}) 采样", palette, has_timestamp_col=True)
             ws.add_chart(chart2, CHART2_ANCHOR)
 
-            _set_sheet_column_widths(ws, [COL_WIDTH_INDEX] + [COL_WIDTH_DATA] * n_batches)
+            _set_sheet_column_widths(ws, [COL_WIDTH_INDEX, COL_WIDTH_TIME] + [COL_WIDTH_DATA] * n_batches)
 
     out_path = os.path.join(log_dir, sweep_filename)
     wb.save(out_path)
@@ -590,14 +622,15 @@ def process_log_dir(log_dir, output_filename):
                 print(f"  [SKIP] {name} (无有效数据)")
                 continue
             batch_list.append((name, prefill_rows, decode_rows))
-            out_path = os.path.join(sub, output_filename)
+            per_batch_filename = f"{name}_{output_filename}" if not output_filename.startswith(name + "_") else output_filename
+            out_path = os.path.join(sub, per_batch_filename)
             _process_one_dir(sub, out_path, prefill_rows, decode_rows)
-            print(f"  [OK] {name} (prefill={len(prefill_rows)}, decode={len(decode_rows)})")
+            print(f"  [OK] {name} -> {per_batch_filename} (prefill={len(prefill_rows)}, decode={len(decode_rows)})")
     if not batch_list:
         print(f"错误：{log_dir} 下既无 prefill.log/decode.log，也无含日志的直接子目录。")
         return 0
     batch_list.sort(key=lambda x: x[0])  # 按子目录名排序
-    sweep_filename = "engine_log_sweep.xlsx"
+    sweep_filename = "vllm_engine_metrics_sweep.xlsx"
     build_sweep_excel(log_dir, batch_list, sweep_filename)
     print(f"批量完成: {len(batch_list)} 个目录已生成 Excel，并已生成汇总表 {sweep_filename}")
     return len(batch_list)
@@ -615,7 +648,7 @@ def main():
     )
     parser.add_argument(
         "--output", "-o", type=str, default=None,
-        help="输出 Excel 文件名（仅文件名，不含路径）；文件始终生成在 prefill.log 同级目录，默认 engine_log_analysis.xlsx",
+        help="输出 Excel 文件名（仅文件名，不含路径）；文件始终生成在 prefill.log 同级目录，默认 vllm_engine_metrics_analysis.xlsx",
     )
     args = parser.parse_args()
     log_dir = os.path.abspath(args.log_dir)
@@ -623,7 +656,7 @@ def main():
         print(f"错误：目录不存在 {log_dir}")
         return 1
 
-    default_filename = "engine_log_analysis.xlsx"
+    default_filename = "vllm_engine_metrics_analysis.xlsx"
     output_filename = (os.path.basename(args.output).strip() if args.output else default_filename) or default_filename
     if not output_filename.lower().endswith(".xlsx"):
         output_filename += ".xlsx"

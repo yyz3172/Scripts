@@ -2,7 +2,8 @@
 """
 从各 batch_* 子目录的 prefill.log / decode.log 中解析「吞吐与并发」指标
 （Avg prompt/generation throughput、Running/Waiting reqs、KV cache/prefix cache 等），
-生成多并发汇总表 Excel：单 sheet，列含 prefill_batch_* 与 decode_batch_*（每个并发档位一组列）。
+生成多并发汇总表 Excel：单 sheet，列名为 BS=N_prefill_* 与 BS=N_decode_*（N 为并发档位如 30/40，
+表头先整块 prefill 再整块 decode，每档含 timestamp + 7 个指标）。
 
 日志行示例（vLLM 周期性打印的吞吐与并发状态）：
   Engine 000: Avg prompt throughput: 2304.0 tokens/s, Avg generation throughput: 227.6 tokens/s, Running: 30 reqs, Waiting: 0 reqs, ...
@@ -97,8 +98,8 @@ def collect_batches(log_dir: Path) -> list[str]:
 
 def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dict):
     """
-    单 sheet：先所有 prefill_batch_* 列，再所有 decode_batch_* 列。
-    行按索引对齐，不足的留空。
+    单 sheet：列名为 BS=N_prefill_*、BS=N_decode_*（N 从 batch_N 解析）。
+    先整块 prefill（各 BS 一组列），再整块 decode；行按索引对齐，不足的留空。
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -112,24 +113,24 @@ def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dic
         ws["A1"] = "无数据"
         return
 
-    # 表头：先 prefill 块，再 decode 块；batch_30 -> BS=30
+    # 表头：列名格式 BS=N_prefill_* / BS=N_decode_*；先 prefill 块（各 BS），再 decode 块
     def bs_label(batch: str) -> str:
         return f"BS={batch.split('_')[1]}"
 
     col_idx = 1
     for batch in batches:
         lb = bs_label(batch)
-        ws.cell(1, col_idx, f"prefill_{lb}_timestamp")
+        ws.cell(1, col_idx, f"{lb}_prefill_timestamp")
         col_idx += 1
         for name in METRIC_NAMES:
-            ws.cell(1, col_idx, f"prefill_{lb}_{name}")
+            ws.cell(1, col_idx, f"{lb}_prefill_{name}")
             col_idx += 1
     for batch in batches:
         lb = bs_label(batch)
-        ws.cell(1, col_idx, f"decode_{lb}_timestamp")
+        ws.cell(1, col_idx, f"{lb}_decode_timestamp")
         col_idx += 1
         for name in METRIC_NAMES:
-            ws.cell(1, col_idx, f"decode_{lb}_{name}")
+            ws.cell(1, col_idx, f"{lb}_decode_{name}")
             col_idx += 1
     total_cols = col_idx - 1
 

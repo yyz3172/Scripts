@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-从各 batch_* 子目录的 prefill.log / decode.log 中解析「吞吐与并发」指标
+从各 batch_* 子目录的 prefill.log / decode.log（或 decode_0.log、decode_1.log、…）中解析「吞吐与并发」指标
 （Avg prompt/generation throughput、Running/Waiting reqs、KV cache/prefix cache 等），
-生成多并发汇总表 Excel：单 sheet，列名为 BS=N_prefill_* 与 BS=N_decode_*（N 为并发档位如 30/40，
-表头先整块 prefill 再整块 decode，每档含 timestamp + 7 个指标）。
+生成多并发汇总表 Excel：单 sheet，列名为 BS=N_prefill_*、BS=N_decode_0_*、BS=N_decode_1_* 等
+（N 为并发档位；多 decode 时每个 D 单独一列块，不同 decode 视为不同数据）。
 
 日志行示例（vLLM 周期性打印的吞吐与并发状态）：
   Engine 000: Avg prompt throughput: 2304.0 tokens/s, Avg generation throughput: 227.6 tokens/s, Running: 30 reqs, Waiting: 0 reqs, ...
 
 用法：
   python throughput_concurrency_sweep_to_excel.py <log_dir> [--output <文件名.xlsx>]
-  # log_dir: 如 log/sharegpt_200_yyz_260313/，其下有 batch_30、batch_40 等子目录，各含 prefill.log、decode.log
+  # log_dir: 如 log/sharegpt_200_yyz_260313/，其下有 batch_30、batch_40 等子目录，各含 prefill.log、decode.log 或 decode_0/1/...
 """
 
 import re
 import os
+import glob
 import argparse
 from pathlib import Path
 
@@ -24,9 +25,9 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # 去掉 ANSI 转义（如 [0;36m(APIServer pid=115079)[0;0m）
 ANSI_STRIP = re.compile(r"\x1b\[[0-9;]*m")
 
-# 吞吐与并发指标行：时间戳 + 各数值（Engine 000 为 vLLM 日志原文）
+# 吞吐与并发指标行：时间戳 + 各数值（Engine 000/001/... 为 vLLM 日志原文，多 decode 时各进程可能为 001、002）
 THROUGHPUT_CONCURRENCY_LINE_PATTERN = re.compile(
-    r"INFO\s+(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+.*?Engine\s+000:\s+"
+    r"INFO\s+(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+.*?Engine\s+\d+:\s+"
     r"Avg prompt throughput:\s+([\d.]+)\s+tokens/s,\s+"
     r"Avg generation throughput:\s+([\d.]+)\s+tokens/s,\s+"
     r"Running:\s+(\d+)\s+reqs,\s+Waiting:\s+(\d+)\s+reqs,\s+"
@@ -82,6 +83,13 @@ def parse_log_file(log_path: Path) -> list[dict]:
     return rows
 
 
+def _decode_file_index(path) -> int:
+    """从 decode_3.log 提取 3，用于多 Decode 文件排序。"""
+    basename = os.path.basename(path)
+    m = re.match(r"decode_(\d+)\.log", basename)
+    return int(m.group(1)) if m else -1
+
+
 def collect_batches(log_dir: Path) -> list[str]:
     """收集 log_dir 下所有 batch_* 目录名，按数字排序。"""
     batches = []
@@ -96,10 +104,24 @@ def collect_batches(log_dir: Path) -> list[str]:
     return [b[1] for b in batches]
 
 
+def load_decode_rows_for_batch(batch_path: Path) -> list[list[dict]]:
+    """
+    加载单个 batch 目录下的 decode 日志。存在 decode.log 则返回 [rows]；
+    否则枚举 decode_0.log、decode_1.log、… 按编号排序后返回 [rows_0, rows_1, ...]。
+    """
+    single = batch_path / "decode.log"
+    if single.exists():
+        return [parse_log_file(single)]
+    pattern = str(batch_path / "decode_*.log")
+    files = sorted(glob.glob(pattern), key=_decode_file_index)
+    return [parse_log_file(Path(p)) for p in files if _decode_file_index(p) >= 0]
+
+
 def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dict):
     """
-    单 sheet：列名为 BS=N_prefill_*、BS=N_decode_*（N 从 batch_N 解析）。
-    先整块 prefill（各 BS 一组列），再整块 decode；行按索引对齐，不足的留空。
+    单 sheet：列名为 BS=N_prefill_*、BS=N_decode_0_*、BS=N_decode_1_* 等（多 decode 时每路 D 一块列）。
+    先整块 prefill（各 BS 一组列），再按 decode_0、decode_1、… 整块（每块内各 BS）；行按索引对齐，不足留空。
+    decode_data[batch] = [decode_0_rows, decode_1_rows, ...]，单 decode 时为 [decode_rows]。
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -113,11 +135,15 @@ def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dic
         ws["A1"] = "无数据"
         return
 
-    # 表头：列名格式 BS=N_prefill_* / BS=N_decode_*；先 prefill 块（各 BS），再 decode 块
+    max_decodes = max(len(decode_data.get(b, [])) for b in batches)
+    if max_decodes == 0:
+        max_decodes = 1
+
     def bs_label(batch: str) -> str:
         return f"BS={batch.split('_')[1]}"
 
     col_idx = 1
+    # 表头：每个 batch 先 prefill 块，再 max_decodes 个 decode 块（decode_0, decode_1, ...）
     for batch in batches:
         lb = bs_label(batch)
         ws.cell(1, col_idx, f"{lb}_prefill_timestamp")
@@ -125,13 +151,13 @@ def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dic
         for name in METRIC_NAMES:
             ws.cell(1, col_idx, f"{lb}_prefill_{name}")
             col_idx += 1
-    for batch in batches:
-        lb = bs_label(batch)
-        ws.cell(1, col_idx, f"{lb}_decode_timestamp")
-        col_idx += 1
-        for name in METRIC_NAMES:
-            ws.cell(1, col_idx, f"{lb}_decode_{name}")
+        for di in range(max_decodes):
+            dec_label = "decode" if max_decodes == 1 else f"decode_{di}"
+            ws.cell(1, col_idx, f"{lb}_{dec_label}_timestamp")
             col_idx += 1
+            for name in METRIC_NAMES:
+                ws.cell(1, col_idx, f"{lb}_{dec_label}_{name}")
+                col_idx += 1
     total_cols = col_idx - 1
 
     for c in range(1, total_cols + 1):
@@ -140,38 +166,41 @@ def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dic
         cell.font = HEADER_FONT
         cell.border = BORDER_THIN
 
-    max_rows = max(
-        max(len(prefill_data.get(b, [])) for b in batches),
-        max(len(decode_data.get(b, [])) for b in batches),
-    )
-    cols_per_batch = 1 + len(METRIC_NAMES)
+    prefill_lens = [len(prefill_data.get(b, [])) for b in batches]
+    decode_lens = []
+    for b in batches:
+        drl = decode_data.get(b, [])
+        decode_lens.append(max(len(dr) for dr in drl) if drl else 0)
+    max_rows = max(max(prefill_lens, default=0), max(decode_lens, default=0), 1)
+    cols_per_prefill = 1 + len(METRIC_NAMES)
+    cols_per_decode = 1 + len(METRIC_NAMES)
 
     for r in range(max_rows):
         col_idx = 1
-        # prefill 块
         for batch in batches:
+            # prefill 块
             rows_list = prefill_data.get(batch, [])
             if r < len(rows_list):
                 row = rows_list[r]
-                ws.cell(r + 2, col_idx, row["timestamp"])
+                ws.cell(r + 2, col_idx, row.get("timestamp", ""))
                 col_idx += 1
                 for name in METRIC_NAMES:
                     ws.cell(r + 2, col_idx, row.get(name, ""))
                     col_idx += 1
             else:
-                col_idx += cols_per_batch
-        # decode 块
-        for batch in batches:
-            rows_list = decode_data.get(batch, [])
-            if r < len(rows_list):
-                row = rows_list[r]
-                ws.cell(r + 2, col_idx, row["timestamp"])
-                col_idx += 1
-                for name in METRIC_NAMES:
-                    ws.cell(r + 2, col_idx, row.get(name, ""))
+                col_idx += cols_per_prefill
+            # decode 块（max_decodes 个）
+            drl = decode_data.get(batch, [])
+            for di in range(max_decodes):
+                if di < len(drl) and r < len(drl[di]):
+                    row = drl[di][r]
+                    ws.cell(r + 2, col_idx, row.get("timestamp", ""))
                     col_idx += 1
-            else:
-                col_idx += cols_per_batch
+                    for name in METRIC_NAMES:
+                        ws.cell(r + 2, col_idx, row.get(name, ""))
+                        col_idx += 1
+                else:
+                    col_idx += cols_per_decode
         for c in range(1, total_cols + 1):
             ws.cell(r + 2, c).border = BORDER_THIN
 
@@ -193,24 +222,20 @@ def main():
     if not batches:
         raise SystemExit(f"未找到 batch_* 子目录: {log_dir}")
 
-    # 按 log 类型收集：prefill / decode
+    # 按 log 类型收集：prefill / decode（多 decode 时 decode_data[batch] 为 [decode_0_rows, decode_1_rows, ...]）
     prefill_data = {}
     decode_data = {}
 
     for batch in batches:
         batch_path = log_dir / batch
         prefill_log = batch_path / "prefill.log"
-        decode_log = batch_path / "decode.log"
 
         if prefill_log.exists():
             prefill_data[batch] = parse_log_file(prefill_log)
         else:
             prefill_data[batch] = []
 
-        if decode_log.exists():
-            decode_data[batch] = parse_log_file(decode_log)
-        else:
-            decode_data[batch] = []
+        decode_data[batch] = load_decode_rows_for_batch(batch_path)
 
     out_path = log_dir / args.output if not os.path.isabs(args.output) else Path(args.output)
     wb = openpyxl.Workbook()

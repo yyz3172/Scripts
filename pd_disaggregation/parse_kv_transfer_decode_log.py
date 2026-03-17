@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-从各 batch 的 decode.log 中解析 Prefill→Decode 的 KV Cache 传输耗时，
-输出 Excel：汇总表 + 按 Batch 对比的折线图。
+从各 batch 的 decode.log（或 decode_0.log、decode_1.log、…）中解析 Prefill→Decode 的 KV Cache 传输耗时，
+输出 Excel：汇总表 + 按 Batch/Decode 对比的折线图。多 decode 时每个 decode 视为独立数据。
 
 解析规则：匹配 "KV cache transfer for request ... took X.XX ms (N groups, M blocks)"
 按请求聚合时取两卡（Worker_TP0/TP1）的最大值作为该请求的传输耗时。
 
 用法：
   python parse_kv_transfer_decode_log.py <log_dir> [--output <文件名.xlsx>]
-  # log_dir: 包含 batch_50, batch_60 等子目录的父目录（其下各有 decode.log），Excel 输出到该目录
+  # log_dir: 包含 batch_50, batch_60 等子目录的父目录（其下各有 decode.log 或 decode_0/1/...），Excel 输出到该目录
   # --output: Excel 文件名，默认为 kv_transfer_summary.xlsx
 """
 
 import re
 import os
+import glob
 import argparse
 from collections import defaultdict
 
@@ -74,29 +75,51 @@ def stats(values):
     }
 
 
+def _decode_file_index(path):
+    """从 decode_3.log 提取 3，用于多 Decode 文件排序。"""
+    basename = os.path.basename(path)
+    m = re.match(r"decode_(\d+)\.log", basename)
+    return int(m.group(1)) if m else -1
+
+
 def collect_batches(log_dir):
-    """在 log_dir 下查找所有 batch_* 子目录（含 decode.log），按并发数排序。"""
+    """
+    在 log_dir 下查找所有 batch_* 子目录，每个目录下需有 decode.log 或 decode_0.log、decode_1.log、…。
+    返回 [(batch_name, concurrency, decode_files), ...]，decode_files 为 [(0, path)] 或 [(0, path), (1, path), ...]，按编号排序。
+    """
     batches = []
     for name in os.listdir(log_dir):
-        if name.startswith("batch_") and os.path.isdir(os.path.join(log_dir, name)):
-            decode_path = os.path.join(log_dir, name, "decode.log")
-            if os.path.isfile(decode_path):
-                try:
-                    concurrency = int(name.replace("batch_", ""))
-                    batches.append((name, concurrency))
-                except ValueError:
-                    continue
+        if not name.startswith("batch_"):
+            continue
+        sub = os.path.join(log_dir, name)
+        if not os.path.isdir(sub):
+            continue
+        try:
+            concurrency = int(name.replace("batch_", ""))
+        except ValueError:
+            continue
+        single = os.path.join(sub, "decode.log")
+        if os.path.isfile(single):
+            batches.append((name, concurrency, [(0, single)]))
+            continue
+        pattern = os.path.join(sub, "decode_*.log")
+        files = sorted(glob.glob(pattern), key=_decode_file_index)
+        if files:
+            decode_files = [(_decode_file_index(p), p) for p in files]
+            decode_files = [(i, p) for i, p in decode_files if i >= 0]
+            if decode_files:
+                batches.append((name, concurrency, decode_files))
     batches.sort(key=lambda x: x[1])
     return batches
 
 
 def write_excel(results, out_path):
-    """写入 Excel：汇总表 + 折线图。"""
+    """写入 Excel：汇总表（含 decode 列）+ 折线图，每条线对应一个 (batch, decode)。"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "汇总"
 
-    headers = ["batch", "concurrency", "count", "min_ms", "avg_ms", "p50_ms", "p90_ms", "p99_ms", "max_ms", "avg_blocks", "max_blocks"]
+    headers = ["batch", "decode", "concurrency", "count", "min_ms", "avg_ms", "p50_ms", "p90_ms", "p99_ms", "max_ms", "avg_blocks", "max_blocks"]
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.fill = HEADER_FILL
@@ -109,20 +132,20 @@ def write_excel(results, out_path):
             cell.border = BORDER_THIN
     n_results = len(results)
     ws.column_dimensions["A"].width = 14
-    for col in "BCDEFGHIJK":
+    ws.column_dimensions["B"].width = 10
+    for col in "CDEFGHIJKL":
         ws.column_dimensions[col].width = 12
 
-    # 折线图数据：横轴=指标(avg_ms, p50_ms, p99_ms, max_ms)，每条线=一个 batch
+    # 折线图数据：横轴=指标，每条线=一个 (batch, decode)
     valid = [x for x in results if x.get("count")]
     if valid:
         chart_start_row = n_results + 3
         n_valid = len(valid)
         metric_names = ["avg_ms", "p50_ms", "p99_ms", "max_ms"]
-        # 第 1 行：空 | batch_50 | batch_60 | ...（系列名）
+        series_labels = [f"{r['batch']}_{r['decode']}" for r in valid]
         ws.cell(row=chart_start_row, column=1, value="")
-        for c, r in enumerate(valid, 2):
-            ws.cell(row=chart_start_row, column=c, value=r["batch"])
-        # 第 2～5 行：指标名 | 各 batch 的该指标值
+        for c, label in enumerate(series_labels, 2):
+            ws.cell(row=chart_start_row, column=c, value=label)
         for r_idx, m in enumerate(metric_names, 1):
             row = chart_start_row + r_idx
             ws.cell(row=row, column=1, value=m)
@@ -157,46 +180,49 @@ def main():
 
     batches = collect_batches(log_dir)
     if not batches:
-        print(f"No batch_* dirs with decode.log found under {log_dir}")
+        print(f"No batch_* dirs with decode.log or decode_*.log found under {log_dir}")
         return 1
 
     results = []
-    for batch_name, concurrency in batches:
-        decode_path = os.path.join(log_dir, batch_name, "decode.log")
-        times, blocks = parse_decode_log(decode_path)
-        if not times:
-            results.append({
-                "batch": batch_name,
-                "concurrency": concurrency,
-                "count": 0,
-                "min_ms": None, "avg_ms": None, "p50_ms": None, "p90_ms": None, "p99_ms": None, "max_ms": None,
-                "avg_blocks": None, "max_blocks": None,
-            })
-            continue
-        st = stats(times)
-        results.append({
-            "batch": batch_name,
-            "concurrency": concurrency,
-            "count": st["count"],
-            "min_ms": round(st["min"], 2),
-            "avg_ms": round(st["avg"], 2),
-            "p50_ms": round(st["p50"], 2),
-            "p90_ms": round(st["p90"], 2),
-            "p99_ms": round(st["p99"], 2),
-            "max_ms": round(st["max"], 2),
-            "avg_blocks": round(sum(blocks) / len(blocks), 1),
-            "max_blocks": max(blocks),
-        })
+    for batch_name, concurrency, decode_files in batches:
+        for di, decode_path in decode_files:
+            decode_label = "decode" if len(decode_files) == 1 else f"decode_{di}"
+            times, blocks = parse_decode_log(decode_path)
+            if not times:
+                results.append({
+                    "batch": batch_name,
+                    "decode": decode_label,
+                    "concurrency": concurrency,
+                    "count": 0,
+                    "min_ms": None, "avg_ms": None, "p50_ms": None, "p90_ms": None, "p99_ms": None, "max_ms": None,
+                    "avg_blocks": None, "max_blocks": None,
+                })
+            else:
+                st = stats(times)
+                results.append({
+                    "batch": batch_name,
+                    "decode": decode_label,
+                    "concurrency": concurrency,
+                    "count": st["count"],
+                    "min_ms": round(st["min"], 2),
+                    "avg_ms": round(st["avg"], 2),
+                    "p50_ms": round(st["p50"], 2),
+                    "p90_ms": round(st["p90"], 2),
+                    "p99_ms": round(st["p99"], 2),
+                    "max_ms": round(st["max"], 2),
+                    "avg_blocks": round(sum(blocks) / len(blocks), 1),
+                    "max_blocks": max(blocks),
+                })
 
     print("KV cache transfer (Decode 侧, 按请求取两卡最大值)")
-    print("-" * 100)
-    print(f"{'batch':<12} {'concurrency':>6} {'count':>6} {'avg_ms':>8} {'p50_ms':>8} {'p99_ms':>8} {'max_ms':>8} {'avg_blk':>8}")
-    print("-" * 100)
+    print("-" * 110)
+    print(f"{'batch':<12} {'decode':<10} {'concurrency':>6} {'count':>6} {'avg_ms':>8} {'p50_ms':>8} {'p99_ms':>8} {'max_ms':>8} {'avg_blk':>8}")
+    print("-" * 110)
     for r in results:
         if r["count"] == 0:
-            print(f"{r['batch']:<12} {r['concurrency']:>6} {r['count']:>6}   --       --       --       --   --")
+            print(f"{r['batch']:<12} {r['decode']:<10} {r['concurrency']:>6} {r['count']:>6}   --       --       --       --   --")
         else:
-            print(f"{r['batch']:<12} {r['concurrency']:>6} {r['count']:>6} {r['avg_ms']:>8.2f} {r['p50_ms']:>8.2f} {r['p99_ms']:>8.2f} {r['max_ms']:>8.2f} {r['avg_blocks']:>8.1f}")
+            print(f"{r['batch']:<12} {r['decode']:<10} {r['concurrency']:>6} {r['count']:>6} {r['avg_ms']:>8.2f} {r['p50_ms']:>8.2f} {r['p99_ms']:>8.2f} {r['max_ms']:>8.2f} {r['avg_blocks']:>8.1f}")
     print("-" * 100)
 
     write_excel(results, out_path)

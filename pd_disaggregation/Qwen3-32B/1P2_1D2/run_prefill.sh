@@ -1,6 +1,6 @@
 #!/bin/sh
-# 1P2+2D2：单机 1 个 P（2 卡 TP=2）+ 2 个 D（各 2 卡 TP=2），共 6 卡，Qwen3-32B。
-# 与 run_decode_1.sh / run_decode_2.sh 配套；connector 中 decode dp_size=2, tp_size=2。
+# 1P2+1D2：单机 1 个 P（2 卡 TP=2）+ 1 个 D（2 卡 TP=2），共 4 卡，Qwen3-32B。
+# 与 run_decode.sh 配套；connector 中 decode dp_size=1, tp_size=2。
 # ========== 配置区 ==========
 nic_name="eth0"
 local_ip="172.17.0.2"
@@ -70,7 +70,7 @@ vllm serve "$model_path" \
         "engine_id": "0",
         "kv_connector_extra_config": {
             "prefill": { "dp_size": 1, "tp_size": 2 },
-            "decode": { "dp_size": 2, "tp_size": 2 }
+            "decode": { "dp_size": 1, "tp_size": 2 }
         },
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector"
     }'

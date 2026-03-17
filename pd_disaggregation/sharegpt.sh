@@ -11,4 +11,4 @@ cd /root/autodl-tmp/code/benchmark
 
 CONFIG_PY="ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat_multiturn.py"
 sed -i "s/batch_size=[0-9]*/batch_size=$BATCH_SIZE/g" "$CONFIG_PY"
-ais_bench --models vllm_api_stream_chat_multiturn --datasets sharegpt_gen --mode perf --num-warmups >> "$LOG_DIR/aisbench.log" 2>&1
+ais_bench --models vllm_api_stream_chat_multiturn --datasets sharegpt_gen --mode perf --num-warmups 0 >> "$LOG_DIR/aisbench.log" 2>&1

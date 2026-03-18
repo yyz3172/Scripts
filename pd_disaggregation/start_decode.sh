@@ -26,7 +26,5 @@ fi
 log "Starting decode in background (TEST_NAME=$TEST_NAME, BATCH_SIZE=$BATCH_SIZE, PD_DIR=$PD_DIR)..."
 source /root/autodl-tmp/py_venv/vllm2/bin/activate
 set -m
-# 多 D 时 run_decode.sh 在子进程里写 decode_0.log / decode_1.log（需 export LOG_DIR）
 nohup bash "$RUN_SCRIPT" &
 echo $! > "$PID_FILE"
-log "Decode started (PID $(cat "$PID_FILE")), logs: $LOG_DIR/decode_0.log $LOG_DIR/decode_1.log"

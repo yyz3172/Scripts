@@ -100,7 +100,8 @@ def collect_batches(log_dir: Path) -> list[str]:
                 batches.append((n, p.name))
             except (IndexError, ValueError):
                 continue
-    batches.sort(key=lambda x: x[0])
+    # 并发数相同（如 batch_60_1P1D_*、batch_60_1P2D_*）时，用目录名做二级排序，保证列顺序稳定
+    batches.sort(key=lambda x: (x[0], x[1]))
     return [b[1] for b in batches]
 
 
@@ -127,37 +128,61 @@ def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dic
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name, 0)
 
+    def _concurrency_from_batch_name(b: str) -> int:
+        try:
+            return int(b.split("_")[1])
+        except (IndexError, ValueError):
+            return -1
+
     batches = sorted(
         set(prefill_data.keys()) | set(decode_data.keys()),
-        key=lambda b: int(b.split("_")[1]),
+        key=lambda b: (_concurrency_from_batch_name(b), b),
     )
     if not batches:
         ws["A1"] = "无数据"
         return
 
-    max_decodes = max(len(decode_data.get(b, [])) for b in batches)
-    if max_decodes == 0:
-        max_decodes = 1
-
     def bs_label(batch: str) -> str:
-        return f"BS={batch.split('_')[1]}"
+        # batch_200_1P2D_tokens_8192 -> BS=200_1P2D_tokens_8192
+        if batch.startswith("batch_"):
+            return f"BS={batch[len('batch_'):]}".replace("__", "_")
+        return f"BS={batch}".replace("__", "_")
+
+    cols_per_prefill = 1 + len(METRIC_NAMES)
+    cols_per_decode = 1 + len(METRIC_NAMES)
+
+    # 针对每个 batch：decode 列块数量不强制等于全局 max_decodes
+    # 这样当某个 batch 实际只有 1 个 decode 时，表头会是 *_decode_timestamp，
+    # 而不会出现空的 *_decode_0_timestamp / *_decode_1_timestamp。
+    batch_specs = []
+    max_rows = 1
+    for batch in batches:
+        pre_rows = prefill_data.get(batch, [])
+        drl = decode_data.get(batch, [])
+        dec_cnt = len(drl)
+        # 最大行数需要考虑：prefill 与所有 decode 路
+        max_rows = max(max_rows, len(pre_rows), max((len(dr) for dr in drl), default=0))
+        batch_specs.append((batch, dec_cnt))
 
     col_idx = 1
-    # 表头：每个 batch 先 prefill 块，再 max_decodes 个 decode 块（decode_0, decode_1, ...）
-    for batch in batches:
+    # 表头：每个 batch 先 prefill 块，再按该 batch 自身 dec_cnt 输出 decode 块
+    for batch, dec_cnt in batch_specs:
         lb = bs_label(batch)
         ws.cell(1, col_idx, f"{lb}_prefill_timestamp")
         col_idx += 1
         for name in METRIC_NAMES:
             ws.cell(1, col_idx, f"{lb}_prefill_{name}")
             col_idx += 1
-        for di in range(max_decodes):
-            dec_label = "decode" if max_decodes == 1 else f"decode_{di}"
+
+        for di in range(dec_cnt):
+            # 仅当该 batch 只有 1 路 decode 时才使用不带编号的 decode 标签
+            dec_label = "decode" if dec_cnt == 1 else f"decode_{di}"
             ws.cell(1, col_idx, f"{lb}_{dec_label}_timestamp")
             col_idx += 1
             for name in METRIC_NAMES:
                 ws.cell(1, col_idx, f"{lb}_{dec_label}_{name}")
                 col_idx += 1
+
     total_cols = col_idx - 1
 
     for c in range(1, total_cols + 1):
@@ -166,18 +191,9 @@ def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dic
         cell.font = HEADER_FONT
         cell.border = BORDER_THIN
 
-    prefill_lens = [len(prefill_data.get(b, [])) for b in batches]
-    decode_lens = []
-    for b in batches:
-        drl = decode_data.get(b, [])
-        decode_lens.append(max(len(dr) for dr in drl) if drl else 0)
-    max_rows = max(max(prefill_lens, default=0), max(decode_lens, default=0), 1)
-    cols_per_prefill = 1 + len(METRIC_NAMES)
-    cols_per_decode = 1 + len(METRIC_NAMES)
-
     for r in range(max_rows):
         col_idx = 1
-        for batch in batches:
+        for batch, dec_cnt in batch_specs:
             # prefill 块
             rows_list = prefill_data.get(batch, [])
             if r < len(rows_list):
@@ -189,10 +205,10 @@ def build_single_sheet(wb, sheet_name: str, prefill_data: dict, decode_data: dic
                     col_idx += 1
             else:
                 col_idx += cols_per_prefill
-            # decode 块（max_decodes 个）
+            # decode 块（按该 batch 的 dec_cnt 个）
             drl = decode_data.get(batch, [])
-            for di in range(max_decodes):
-                if di < len(drl) and r < len(drl[di]):
+            for di in range(dec_cnt):
+                if r < len(drl[di]):
                     row = drl[di][r]
                     ws.cell(r + 2, col_idx, row.get("timestamp", ""))
                     col_idx += 1
@@ -226,7 +242,8 @@ def main():
     prefill_data = {}
     decode_data = {}
 
-    for batch in batches:
+    total_batches = len(batches)
+    for bi, batch in enumerate(batches, 1):
         batch_path = log_dir / batch
         prefill_log = batch_path / "prefill.log"
 
@@ -236,6 +253,13 @@ def main():
             prefill_data[batch] = []
 
         decode_data[batch] = load_decode_rows_for_batch(batch_path)
+        # 防止以为卡住：每遍历一个 batch（子目录）打印一次解析结果概况
+        dec_lens = [len(dr) for dr in decode_data.get(batch, [])]
+        print(
+            f"[throughput_sweep] ({bi}/{total_batches}) batch_dir={batch} "
+            f"prefill_rows={len(prefill_data.get(batch, []))} "
+            f"decode_files={len(dec_lens)} decode_rows={dec_lens}"
+        )
 
     out_path = log_dir / args.output if not os.path.isabs(args.output) else Path(args.output)
     wb = openpyxl.Workbook()

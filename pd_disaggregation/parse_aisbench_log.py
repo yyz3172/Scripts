@@ -15,7 +15,7 @@
 
 用法：
   python parse_aisbench_log.py <log_dir> [--output <文件名.xlsx>]
-  log_dir: 包含 batch_50, batch_60 等子目录的父目录（其下各有 aisbench.log），Excel 输出到该目录
+  log_dir: 包含以 batch_ 开头的子目录的父目录（各子目录下含 aisbench.log），Excel 输出到该目录
   --output: 输出 Excel 文件名，默认见配置 DEFAULT_OUTPUT_FILENAME
 """
 
@@ -25,7 +25,7 @@ import argparse
 
 import openpyxl
 from openpyxl.chart import LineChart, Reference
-from openpyxl.styles import Font, PatternFill, Border, Side
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
 # -----------------------------------------------------------------------------
 # 配置（可按需修改）
@@ -40,12 +40,12 @@ BORDER_THIN = Border(
 # 折线图尺寸（宽、高）
 CHART_WIDTH = 40
 CHART_HEIGHT = 20
-# 汇总表：Sheet 名、首列表头文案、首行数据指标（不含 batch，因表头列已是 batch 名）
+# 汇总表：Sheet 名、首列「指标」、首行数据为 all_keys
 SUMMARY_SHEET_TITLE = "汇总"
 SUMMARY_HEADER_LABEL = "指标"
-SUMMARY_FIRST_ROW_HEADERS = ["concurrency"]
-COL_WIDTH_INDEX = 24      # 汇总表指标列（A 列）宽
-COL_WIDTH_DATA = 14       # 汇总表与图表页数据列宽
+SUMMARY_FIRST_ROW_HEADERS = []
+COL_WIDTH_INDEX = 32      # 汇总表指标列（A 列）宽
+COL_WIDTH_DATA = 24       # 汇总表与图表页数据列宽
 # 图表页：指标列宽、纵轴边距比例、Excel 表名最大长度
 CHART_SHEET_COL_WIDTH_INDEX = 22
 CHART_AXIS_MARGIN_RATIO = 0.05
@@ -79,14 +79,14 @@ CHART_GROUP_UNITS = {
     "OutputTokenThroughput": "token/s",
     "Throughput": "",
 }
-# 仅写入汇总表、不参与折线图分组的键（当前未用于逻辑，可作扩展参考）
+# 仅写入汇总表、不参与折线图分组的键
 TABLE_ONLY_KEYS = frozenset({
     "Benchmark_Duration", "Total_Requests", "Failed_Requests", "Success_Requests",
     "Concurrency", "Max_Concurrency", "N",
 })
 # 默认输出 Excel 文件名、控制台打印分隔线宽度
 DEFAULT_OUTPUT_FILENAME = "aisbench_performance_summary.xlsx"
-PRINT_SEP_WIDTH = 80
+PRINT_SEP_WIDTH = 140
 # -----------------------------------------------------------------------------
 
 
@@ -97,6 +97,31 @@ def _parse_value(s):
     s = s.strip()
     m = re.match(r"([\d.]+)", s)
     return float(m.group(1)) if m else None
+
+
+def _parse_duration_to_minutes(raw: str):
+    """
+    将 Benchmark Duration 的带单位字符串转换为分钟。
+    例如：
+      - '61714.2 ms' -> 1.02857 min
+      - '61.7 s' -> 1.02833 min
+      - '1.03 min' -> 1.03 min
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip().lower()
+    m = re.match(r"^([\d.]+)\s*([a-z]+)$", s)
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = m.group(2)
+    if unit in ("ms", "millisecond", "milliseconds"):
+        return val / 60000.0
+    if unit in ("s", "sec", "secs", "second", "seconds"):
+        return val / 60.0
+    if unit in ("m", "min", "mins", "minute", "minutes"):
+        return val
+    return None
 
 
 def _row_cells(line):
@@ -166,23 +191,27 @@ def parse_aisbench_log(aisbench_log_path):
             key = name.replace(" ", "_")
             out[key] = val
             disp[key] = raw
+            # 让汇总页对比更方便：Benchmark Duration 从原始单位换算成分钟
+            if key == "Benchmark_Duration":
+                dur_min = _parse_duration_to_minutes(raw)
+                if dur_min is not None:
+                    out["Benchmark_Duration_Min"] = dur_min
+                    disp["Benchmark_Duration_Min"] = f"{dur_min:.3f} min"
     return out, disp
 
 
 def collect_batches(log_dir):
-    """在 log_dir 下查找所有 batch_* 子目录（含 aisbench.log），按并发数排序。"""
-    batches = []
+    """在 log_dir 下查找所有以 batch_ 开头的子目录（含 aisbench.log），按目录名排序。"""
+    names = []
     for name in os.listdir(log_dir):
-        if name.startswith("batch_") and os.path.isdir(os.path.join(log_dir, name)):
-            path = os.path.join(log_dir, name, "aisbench.log")
-            if os.path.isfile(path):
-                try:
-                    concurrency = int(name.replace("batch_", ""))
-                    batches.append((name, concurrency))
-                except ValueError:
-                    continue
-    batches.sort(key=lambda x: x[1])
-    return batches
+        full_path = os.path.join(log_dir, name)
+        if not name.startswith("batch_") or not os.path.isdir(full_path):
+            continue
+        if not os.path.isfile(os.path.join(full_path, "aisbench.log")):
+            continue
+        names.append(name)
+    names.sort()
+    return names
 
 
 def write_excel(results, out_path, all_keys, results_disp=None):
@@ -196,8 +225,70 @@ def write_excel(results, out_path, all_keys, results_disp=None):
     ws = wb.active
     ws.title = SUMMARY_SHEET_TITLE
 
-    # 汇总表转置：第1列=指标名，第2列起=各 batch（表头已含 batch 名，不再单独一行 batch）
-    row_headers = list(SUMMARY_FIRST_ROW_HEADERS) + all_keys
+    # 汇总表转置：第 1 列=指标名（含单位），第 2 列起=各 batch（表头为 batch 名）
+    # 汇总页只展示部分关键统计（例如性能参数类仅展示 *_Avg；并且按自定义顺序排列）；
+    # 数据列不显示单位（只放数值）。
+    def _should_show_in_summary(k: str) -> bool:
+        for group in PERF_PARAM_NAMES:
+            prefix = f"{group}_"
+            if k.startswith(prefix):
+                suffix = k[len(prefix):]
+                # 汇总页只保留 Avg，不展示 _Min/_Max/_N 等
+                return suffix == "Avg"
+        return True
+
+    # 汇总页指标排序：先固定关键顺序，再按实际用途分类追加其余指标
+    summary_order = [
+        "Max_Concurrency",
+        "Concurrency",
+        "Total_Requests",
+        "Benchmark_Duration",
+        "Benchmark_Duration_Min",
+        "E2EL_Avg",
+        "TTFT_Avg",
+        "TPOT_Avg",
+        "ITL_Avg",
+        # token 量与生成速度（Performance Parameters 的 Avg）
+        "InputTokens_Avg",
+        "OutputTokens_Avg",
+        "OutputTokenThroughput_Avg",
+        # throughput（Common Metric）
+        "Request_Throughput",
+        "Prefill_Token_Throughput",
+        "Output_Token_Throughput",
+        "Total_Token_Throughput",
+        # 失败/成功统计
+        "Failed_Requests",
+        "Success_Requests",
+    ]
+    summary_keys = [k for k in summary_order if k in all_keys and _should_show_in_summary(k)]
+    fixed_set = set(summary_order)
+    leftovers = sorted([k for k in all_keys if _should_show_in_summary(k) and k not in fixed_set])
+    summary_keys = summary_keys + leftovers
+
+    def _metric_unit(key: str) -> str:
+        # Common Metric
+        if key == "Benchmark_Duration":
+            return "ms"
+        if key == "Benchmark_Duration_Min":
+            return "min"
+        # Performance Parameters
+        if key.startswith(("E2EL_", "TTFT_", "TPOT_", "ITL_")):
+            return "ms"
+        # Throughput variants
+        if key == "Request_Throughput":
+            return "req/s"
+        if "Token_Throughput" in key:
+            return "token/s"
+        # OutputTokenThroughput_xxx
+        grp = key.split("_", 1)[0]
+        return CHART_GROUP_UNITS.get(grp, "")
+
+    def _format_metric_label(key: str) -> str:
+        unit = _metric_unit(key)
+        return f"{key}/{unit}" if unit else key
+
+    row_headers = list(SUMMARY_FIRST_ROW_HEADERS) + summary_keys
     n_results = len(results)
     ws.cell(row=1, column=1, value=SUMMARY_HEADER_LABEL).fill = HEADER_FILL
     ws.cell(row=1, column=1).font = HEADER_FONT
@@ -207,18 +298,16 @@ def write_excel(results, out_path, all_keys, results_disp=None):
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.border = BORDER_THIN
+        cell.alignment = Alignment(horizontal="center", vertical="center")
     for r_idx, key in enumerate(row_headers, 2):
-        ws.cell(row=r_idx, column=1, value=key).border = BORDER_THIN
+        ws.cell(row=r_idx, column=1, value=_format_metric_label(key)).border = BORDER_THIN
         for c, row in enumerate(results, 2):
-            # 优先显示带单位的字符串，否则用数值
-            d = results_disp[c - 2] if c - 2 < len(results_disp) else {}
-            if key in d and (d[key] or "").strip():
-                val = d[key].strip()
-            else:
-                val = row.get(key)
-                val = val if val is not None else ""
+            # 汇总页数据列不显示单位：直接用数值
+            val = row.get(key)
+            val = val if val is not None else ""
             cell = ws.cell(row=r_idx, column=c, value=val)
             cell.border = BORDER_THIN
+            cell.alignment = Alignment(horizontal="center", vertical="center")
     ws.column_dimensions["A"].width = COL_WIDTH_INDEX
     for c in range(2, 2 + n_results):
         try:
@@ -248,7 +337,7 @@ def write_excel(results, out_path, all_keys, results_disp=None):
             ws_group.cell(row=chart_start_row, column=col_anchor + 1 + c, value=r["batch"])
         for r_idx, m in enumerate(chart_metrics, 1):
             row = chart_start_row + r_idx
-            ws_group.cell(row=row, column=col_anchor, value=m)
+            ws_group.cell(row=row, column=col_anchor, value=_format_metric_label(m))
             for c, r in enumerate(valid):
                 ws_group.cell(row=row, column=col_anchor + 1 + c, value=r.get(m))
         # 收集该图数据范围，用于纵轴缩放（不强制从 0 开始）
@@ -290,7 +379,7 @@ def write_excel(results, out_path, all_keys, results_disp=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Parse AISBench Performance Results from aisbench.log, output Excel.")
-    parser.add_argument("log_dir", help="Parent dir containing batch_50, batch_60, ... with aisbench.log")
+    parser.add_argument("log_dir", help="父目录，其下含以 batch_ 开头的子目录，各子目录下有 aisbench.log")
     parser.add_argument("--output", default=DEFAULT_OUTPUT_FILENAME, help="Output Excel filename")
     args = parser.parse_args()
 
@@ -308,34 +397,38 @@ def main():
     results = []
     results_disp = []
     all_keys_set = set()
-    for batch_name, concurrency in batches:
+    for batch_name in batches:
         path = os.path.join(log_dir, batch_name, "aisbench.log")
         row, disp = parse_aisbench_log(path)
         row["batch"] = batch_name
-        row["concurrency"] = concurrency
         results.append(row)
         results_disp.append(disp)
-        all_keys_set.update(k for k in row if k not in ("batch", "concurrency"))
+        all_keys_set.update(k for k in row if k != "batch")
 
-    # 列顺序：先 batch/concurrency，再按 key 排序，保证各 batch 列一致
+    # 按日志中的 Max_Concurrency 排序，再按 batch 名
+    def _conc(r):
+        c = r.get("Max_Concurrency")
+        return c if c is not None else -1
+    order = sorted(range(len(results)), key=lambda i: (_conc(results[i]), results[i].get("batch", "")))
+    results = [results[i] for i in order]
+    results_disp = [results_disp[i] for i in order]
     all_keys = sorted(all_keys_set)
 
-    print("AISBench Performance Results (from aisbench.log)")
+    # 控制台打印：只保留关键信息（便于快速看趋势）
+    # Benchmark_Duration_Min: 分钟
+    # E2EL_Avg / TTFT_Avg: 毫秒
+    print("AISBench (关键指标 from aisbench.log)")
     print("-" * PRINT_SEP_WIDTH)
-    print(f"{'batch':<12} {'concurrency':>6}  E2EL_Avg   TTFT_Avg  ReqThroughput  PrefillTok/s  OutTok/s")
+    print(f"{'batch':<30}  Benchmark_Duration_Min(min)  E2EL_Avg(ms)  TTFT_Avg(ms)")
     print("-" * PRINT_SEP_WIDTH)
     for r in results:
+        bdmin = r.get("Benchmark_Duration_Min")
         e2el = r.get("E2EL_Avg")
         ttft = r.get("TTFT_Avg")
-        rt = r.get("Request_Throughput")
-        pt = r.get("Prefill_Token_Throughput")
-        ot = r.get("Output_Token_Throughput")
+        bdmin_s = f"{bdmin:.3f}" if bdmin is not None else "--"
         e2el_s = f"{e2el:.0f}" if e2el is not None else "--"
         ttft_s = f"{ttft:.0f}" if ttft is not None else "--"
-        rt_s = f"{rt:.3f}" if rt is not None else "--"
-        pt_s = f"{pt:.1f}" if pt is not None else "--"
-        ot_s = f"{ot:.1f}" if ot is not None else "--"
-        print(f"{r['batch']:<12} {r['concurrency']:>6}  {e2el_s:>8}   {ttft_s:>8}  {rt_s:>14}  {pt_s:>12}  {ot_s:>8}")
+        print(f"{r['batch']:<30}  {bdmin_s:>26}  {e2el_s:>12}  {ttft_s:>12}")
     print("-" * PRINT_SEP_WIDTH)
 
     write_excel(results, out_path, all_keys, results_disp)

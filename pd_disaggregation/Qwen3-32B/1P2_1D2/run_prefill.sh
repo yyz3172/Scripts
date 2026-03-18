@@ -54,8 +54,8 @@ vllm serve "$model_path" \
     --seed 1024 \
     --served-model-name qwen3_32b \
     --dtype bfloat16 \
-    --max-model-len 8192 \
-    --max-num-batched-tokens 512 \
+    --max-model-len 16k \
+    --max-num-batched-tokens 8192 \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \

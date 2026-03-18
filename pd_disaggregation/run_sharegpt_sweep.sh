@@ -8,8 +8,9 @@ TEST_NAME="${1:?Usage: $0 <test_name>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── 配置项 ───────────────────────────────────────────────────────────────────
-PD_DIR="$SCRIPT_DIR/Qwen3-32B/1P2_2D2"
-BATCH_SIZES=(60 80 140 50)
+PD_MODE="Qwen3-32B/1P2_2D2"
+PD_DIR="$SCRIPT_DIR/$PD_MODE"
+BATCH_SIZES=(60 80 120 200)
 VLLM_PORT=9010
 VLLM_PROXY_PORT=8000
 VLLM_PREFILL_PORT=9000
@@ -109,7 +110,7 @@ for BATCH_SIZE in "${BATCH_SIZES[@]}"; do
 
     # 6. 运行压测（连 BENCH_PORT：代理或直连 Decode）
     log "Running sharegpt benchmark (BATCH_SIZE=$BATCH_SIZE, port=$BENCH_PORT)..."
-    if bash "$SCRIPT_DIR/sharegpt.sh" "$TEST_NAME" "$BATCH_SIZE" "$BENCH_PORT"; then
+    if bash "$SCRIPT_DIR/sharegpt.sh" "$TEST_NAME" "$BATCH_SIZE" "$BENCH_PORT" "$PD_MODE"; then
         log "Benchmark finished: BATCH_SIZE=$BATCH_SIZE"
     else
         log "WARNING: benchmark exited with error for BATCH_SIZE=$BATCH_SIZE, continuing..."

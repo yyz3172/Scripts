@@ -20,6 +20,7 @@ import re
 import os
 import glob
 import argparse
+import colorsys
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -575,11 +576,29 @@ def _add_sweep_chart(ws, row0, n_rows, batch_entries, title, palette, has_timest
         chart.series[-1].smooth = True
     for i in range(len(chart.series)):
         line = chart.series[i].graphicalProperties.line
-        pair = palette[i % len(palette)] if i < len(palette) else ("333333", "999999")
-        line.solidFill = pair[0]
+        # palette 传入每条线一个颜色（hex），避免多 batch 时颜色重复
+        if palette and i < len(palette):
+            line.solidFill = palette[i]
+        else:
+            line.solidFill = "333333"
         line.dashStyle = "solid"
         line.width = LINE_WIDTH_EMU
     return chart
+
+
+def _series_colors(n: int) -> list[str]:
+    """为 n 条折线生成尽量不同的颜色（hex），用于 sweep 多子目录区分。"""
+    if n <= 0:
+        return []
+    # 调低饱和度与明度：避免 Excel 里颜色过于“鲜艳/刺眼”，同时仍保持可区分。
+    s = 0.52
+    v = 0.78
+    colors = []
+    for i in range(n):
+        hue = i / n
+        r, g, b = colorsys.hsv_to_rgb(hue, s, v)
+        colors.append(f"{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}")
+    return colors
 
 
 def build_sweep_excel(log_dir, batch_entries, sweep_filename):
@@ -626,10 +645,10 @@ def build_sweep_excel(log_dir, batch_entries, sweep_filename):
             _write_sweep_data_block(ws, row0_sampled, batch_series, batch_entries, indices_sampled, timestamps=timestamps)
 
             n_batches = len(batch_entries)
-            palette = _chart_palette(n_batches, 1)
-            chart1 = _add_sweep_chart(ws, row0_full, n_points, batch_entries, f"{title_base} ({source}) 原始数据", palette, has_timestamp_col=True)
+            colors = _series_colors(n_batches)
+            chart1 = _add_sweep_chart(ws, row0_full, n_points, batch_entries, f"{title_base} ({source}) 原始数据", colors, has_timestamp_col=True)
             ws.add_chart(chart1, "A1")
-            chart2 = _add_sweep_chart(ws, row0_sampled, n_sampled, batch_entries, f"{title_base} ({source}) 采样", palette, has_timestamp_col=True)
+            chart2 = _add_sweep_chart(ws, row0_sampled, n_sampled, batch_entries, f"{title_base} ({source}) 采样", colors, has_timestamp_col=True)
             ws.add_chart(chart2, CHART2_ANCHOR)
 
             _set_sheet_column_widths(ws, [COL_WIDTH_INDEX, COL_WIDTH_TIME] + [COL_WIDTH_DATA] * n_batches)
@@ -643,11 +662,14 @@ def process_log_dir(log_dir, output_filename):
     """
     仅两种情形：
     1）log_dir 下直接有 prefill.log / decode.log：在该目录下生成 Excel，返回 1。
-    2）log_dir 下无日志，仅有若干直接子目录且子目录下有 prefill.log / decode.log：对每个此类子目录生成 Excel，返回处理数量。
+    2）log_dir 下无日志，仅有若干直接子目录且子目录下有 prefill.log / decode.log：对每个此类子目录生成 Excel，汇总表仅写在父目录。
     """
     log_dir = os.path.abspath(log_dir)
 
     if _dir_has_logs(log_dir):
+        # 单目录模式只应生成「分析」表，不应生成 sweep 命名文件（sweep 仅用于批量时的父目录汇总）
+        if "sweep" in output_filename.lower():
+            output_filename = "vllm_engine_metrics_analysis.xlsx"
         out_path = os.path.join(log_dir, output_filename)
         prefill_rows, decode_rows_list = load_prefill_decode(log_dir)
         if not prefill_rows and not any(decode_rows_list):

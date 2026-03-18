@@ -2,7 +2,7 @@
 # 1P2+1D2：单脚本启动 1 个 Decode 实例。与 run_prefill.sh 配套。
 # 用法：
 #   bash run_decode.sh          # 后台启动 D0 并 wait（供 start_decode.sh 调用）
-#   bash run_decode.sh 0         # 仅启动第 1 个 D（卡 2,3，端口 9010）
+#   bash run_decode.sh 0        # 仅启动第 1 个 D（卡 2,3，端口 9010）
 # ========== 配置区（须与 run_prefill.sh 一致）==========
 nic_name="eth0"
 local_ip="172.17.0.2"
@@ -11,7 +11,7 @@ transfer_engine_lib_path="/usr/local/lib"
 python_lib_path="/root/.local/share/uv/python/cpython-3.11.15-linux-aarch64-gnu/lib"
 dp_size=1
 dp_ip="127.0.0.1"
-dp_rpc_port=13495
+dp_port=13495
 # 单个 D：engine_port 9010，visible_devices 2,3
 # ==========================================
 
@@ -44,7 +44,7 @@ run_one() {
 
     export VLLM_DP_SIZE=$dp_size
     export VLLM_DP_MASTER_IP=$dp_ip
-    export VLLM_DP_MASTER_PORT=$dp_rpc_port
+    export VLLM_DP_MASTER_PORT=$dp_port
     export VLLM_DP_RANK_LOCAL=0
     export VLLM_DP_RANK=$dp_rank
     export VLLM_DP_SIZE_LOCAL=1
@@ -59,16 +59,11 @@ run_one() {
         --port $engine_port \
         --tensor-parallel-size 2 \
         --nnodes 1 \
-        --data-parallel-size $dp_size \
-        --data-parallel-rank $dp_rank \
-        --data-parallel-address $dp_ip \
-        --data-parallel-rpc-port $dp_rpc_port \
-        --data-parallel-size-local 1 \
         --seed 1024 \
         --served-model-name qwen3_32b \
         --dtype bfloat16 \
-        --max-model-len 8192 \
-        --max-num-batched-tokens 256 \
+        --max-model-len 16k \
+        --max-num-batched-tokens 1024 \
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
@@ -94,7 +89,7 @@ if [ $# -eq 0 ]; then
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     LOG_DIR="${LOG_DIR:-.}"
     mkdir -p "$LOG_DIR"
-    "$SCRIPT_DIR/run_decode.sh" 0 >> "${LOG_DIR}/decode.log" 2>&1 &
+    bash "$SCRIPT_DIR/run_decode.sh" 0 >> "${LOG_DIR}/decode.log" 2>&1 &
     wait
 else
     run_one "$1"

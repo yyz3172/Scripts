@@ -70,8 +70,8 @@ run_one() {
         --seed 1024 \
         --served-model-name qwen3_32b \
         --dtype bfloat16 \
-        --max-model-len 8192 \
-        --max-num-batched-tokens 256 \
+        --max-model-len 16k \
+        --max-num-batched-tokens 1024 \
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
@@ -98,8 +98,8 @@ if [ $# -eq 0 ]; then
     # 统一写 decode_0.log / decode_1.log：有 LOG_DIR 用其下，否则用当前目录
     LOG_DIR="${LOG_DIR:-.}"
     mkdir -p "$LOG_DIR"
-    "$SCRIPT_DIR/run_decode.sh" 0 >> "${LOG_DIR}/decode_0.log" 2>&1 &
-    "$SCRIPT_DIR/run_decode.sh" 1 >> "${LOG_DIR}/decode_1.log" 2>&1 &
+    bash "$SCRIPT_DIR/run_decode.sh" 0 >> "${LOG_DIR}/decode_0.log" 2>&1 &
+    bash "$SCRIPT_DIR/run_decode.sh" 1 >> "${LOG_DIR}/decode_1.log" 2>&1 &
     wait
 else
     run_one "$1"

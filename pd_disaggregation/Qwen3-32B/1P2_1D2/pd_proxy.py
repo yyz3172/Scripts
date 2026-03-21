@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-# .../code/Scripts/pd_python/Qwen3-32B/1P2_1D2/pd_proxy.py -> parents[4] == code/
+# .../code/Scripts/pd_disaggregation/Qwen3-32B/1P2_1D2/pd_proxy.py -> parents[4] == code/
 _CODE_ROOT = Path(__file__).resolve().parents[4]
 PROXY_SCRIPT = (
     _CODE_ROOT

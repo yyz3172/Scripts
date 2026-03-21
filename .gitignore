@@ -2,3 +2,4 @@
 *log/
 *logs/
 *nohup.out
+*__pycache__/

@@ -3,7 +3,7 @@
 # 与 run_decode.sh 配套；connector 中 decode dp_size=1, tp_size=2。
 # ========== 配置区 ==========
 nic_name="eth0"
-local_ip="172.17.0.2"
+local_ip="172.17.0.4"
 model_path="/root/autodl-tmp/models/Qwen3-32B"
 # transfer_engine_lib_path="/usr/local/Ascend/ascend-toolkit/latest/lib64"
 transfer_engine_lib_path="/usr/local/lib"
@@ -54,10 +54,12 @@ vllm serve "$model_path" \
     --seed 1024 \
     --served-model-name qwen3_32b \
     --dtype bfloat16 \
-    --max-model-len 16k \
-    --max-num-batched-tokens 8192 \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 32768 \
     --max-num-seqs 256 \
     --trust-remote-code \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
     --gpu-memory-utilization 0.9 \
     --enforce-eager \
     --kv-transfer-config \

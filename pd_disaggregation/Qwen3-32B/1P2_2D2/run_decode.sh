@@ -6,7 +6,7 @@
 #   bash run_decode.sh 1         # 仅启动第 2 个 D（卡 4,5，端口 9011）
 # ========== 配置区（须与 run_prefill.sh 一致）==========
 nic_name="eth0"
-local_ip="172.17.0.2"
+local_ip="172.17.0.4"
 model_path="/root/autodl-tmp/models/Qwen3-32B"
 transfer_engine_lib_path="/usr/local/lib"
 python_lib_path="/root/.local/share/uv/python/cpython-3.11.15-linux-aarch64-gnu/lib"
@@ -70,9 +70,11 @@ run_one() {
         --seed 1024 \
         --served-model-name qwen3_32b \
         --dtype bfloat16 \
-        --max-model-len 16k \
-        --max-num-batched-tokens 1024 \
+        --max-model-len 32768 \
+        --max-num-batched-tokens 32768 \
         --max-num-seqs 256 \
+        --enable-auto-tool-choice \
+        --tool-call-parser hermes \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
         --enforce-eager \

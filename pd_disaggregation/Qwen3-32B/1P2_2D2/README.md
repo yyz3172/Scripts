@@ -14,7 +14,7 @@
 
 ## 负载均衡代理（可选）
 
-`pd_proxy.sh` 将 1 个 P（9000）与 2 个 D（9010、9011）统一到端口 8000，客户端连 8000 即可。先起 P 和 D，再执行：`bash pd_proxy.sh`。可通过环境变量 `PREFILL_HOST`、`PROXY_PORT` 覆盖本机 IP 与代理端口。
+`pd_proxy.sh` 将 1 个 P（9000）与 2 个 D（9010、9011）统一到端口 8000，客户端连 8000 即可。先起 P 和 D，再执行：`bash pd_proxy.sh`。与 prefill/decode 相同：通过 `LOCAL_IP`（本机互通 IP）、`NIC_NAME` 注入；`PROXY_PORT` 可覆盖代理监听端口。
 
 ## 压测 / sweep
 
@@ -22,5 +22,6 @@
 
 ## 配置
 
-- `run_prefill.sh` 与 `run_decode.sh` 顶部配置区的 `nic_name`、`local_ip`、`model_path` 须一致。
+- `NIC_NAME`、`LOCAL_IP` 建议与 `pd_python/pd_service_ctl.py` 中常量一致，或由上层 `export` 后启动脚本。
+- `run_prefill.sh` 与 `run_decode.sh` 中 `model_path` 等模型/部署项须一致。
 - 若卡号/端口与默认不同，请改 `run_decode.sh` 里 `run_one()` 的 `case $dp_rank in` 对应项。

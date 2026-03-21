@@ -1,8 +1,8 @@
 #!/bin/sh
-# 1P2+2D2：单机 1 个 P（2 卡 TP=2）+ 2 个 D（各 2 卡 TP=2），共 6 卡，Qwen3-32B。
-# 与 run_decode_1.sh / run_decode_2.sh 配套；connector 中 decode dp_size=2, tp_size=2。
+# pd_python/Qwen3-32B/1P2_2D2：单机 1 个 P（2 卡 TP=2）+ 2 个 D（各 2 卡 TP=2），共 6 卡，Qwen3-32B。
+# 与 run_decode.sh 配套；connector 中 decode dp_size=2, tp_size=2。
 # ========== 配置区 ==========
-# NIC_NAME / LOCAL_IP 由上层注入（如 pd_python/pd_service_ctl）；单独跑请 export，默认与 pd_service_ctl 常量一致。
+# NIC_NAME / LOCAL_IP 由 PdServiceCtl 注入；单独跑脚本时请 export，默认值与 pd_service_ctl 中常量一致。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
 model_path="/root/autodl-tmp/models/Qwen3-32B"
@@ -48,6 +48,8 @@ export TASK_QUEUE_ENABLE=1
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
+# 日志：vllm 输出始终写入 ${LOG_DIR}/prefill.log；LOG_DIR 未设置时默认为当前目录。
+run_prefill() {
 vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
@@ -77,4 +79,8 @@ vllm serve "$model_path" \
         },
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector"
     }'
+}
 
+LOG_DIR="${LOG_DIR:-.}"
+mkdir -p "$LOG_DIR"
+run_prefill >> "${LOG_DIR}/prefill.log" 2>&1

@@ -103,12 +103,25 @@ def _sweep_log_fn(sweep_log: Path):
     return lambda msg: log_sweep(sweep_log, msg)
 
 
-def patch_benchmark_batch_size(config_py: Path, batch_size: int) -> None:
-    """将配置里 `batch_size=` 后的数值段替换为当前 batch（允许原值为空）。"""
+def pd_mode_to_model_name(pd_mode: str) -> str:
+    """由 pd_mode 推导模型名：取第一段并转为小写，`-` 替换为 `_`。"""
+    mode = pd_mode.strip("/").replace("\\", "/")
+    if not mode:
+        raise RuntimeError("pd_mode 为空，无法推导 model 名")
+    model_part = mode.split("/", 1)[0]
+    return model_part.lower().replace("-", "_")
+
+
+def patch_benchmark_config(config_py: Path, batch_size: int, pd_mode: str) -> None:
+    """替换配置中的 `batch_size` 与 `model`，其中 model 由 pd_mode 推导。"""
     text = config_py.read_text(encoding="utf-8")
-    new, n = re.subn(r"batch_size=\d*", f"batch_size={batch_size}", text)
-    if n == 0:
+    new, n_batch = re.subn(r"batch_size=\d*", f"batch_size={batch_size}", text)
+    if n_batch == 0:
         raise RuntimeError(f"未找到 batch_size= 可替换项: {config_py}")
+    model_name = pd_mode_to_model_name(pd_mode)
+    new, n_model = re.subn(r'model\s*=\s*"[^"]*"', f'model="{model_name}"', new)
+    if n_model == 0:
+        raise RuntimeError(f"未找到 model= 可替换项: {config_py}")
     config_py.write_text(new, encoding="utf-8")
 
 
@@ -125,7 +138,7 @@ def run_sharegpt_benchmark(
         log_sweep(sweep_log, f"ERROR: benchmark 配置不存在: {config_py}")
         return 1
 
-    patch_benchmark_batch_size(config_py, batch_size)
+    patch_benchmark_config(config_py, batch_size, cfg.pd_mode)
     work_dir = f"sharegpt_{cfg.pd_mode}"
     ais_log = log_dir / "aisbench.log"
     activate = cfg.tester_venv / "bin" / "activate"
@@ -246,7 +259,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     p.add_argument(
         "--batch_sizes",
         default="200",
-        help="逗号分隔的 batch 列表，如 60,80,120,200",
+        help="逗号分隔的 batch 列表，如 \"60,80,120,200\", 当前默认\"200\"",
     )
     
     p.add_argument("--benchmark_dir", type=Path, default=BENCHMARK_DIR)

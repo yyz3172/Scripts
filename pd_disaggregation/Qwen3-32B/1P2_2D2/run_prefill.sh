@@ -60,6 +60,7 @@ vllm serve "$model_path" \
     --max-model-len 32768 \
     --max-num-batched-tokens 32768 \
     --max-num-seqs 256 \
+    --long-prefill-token-threshold 1024 \
     --trust-remote-code \
     --enable-auto-tool-choice \
     --tool-call-parser hermes \

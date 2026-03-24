@@ -521,6 +521,23 @@ def _mean_over_rows(rows, col):
     return sum(vals) / len(vals)
 
 
+def _percentile(vals, q):
+    """计算分位数（q in [0,1]），使用线性插值；空列表返回 None。"""
+    if not vals:
+        return None
+    arr = sorted(vals)
+    if len(arr) == 1:
+        return arr[0]
+    q = min(max(q, 0.0), 1.0)
+    pos = (len(arr) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(arr) - 1)
+    if lo == hi:
+        return arr[lo]
+    frac = pos - lo
+    return arr[lo] * (1.0 - frac) + arr[hi] * frac
+
+
 def _sanitize_sheet_title(title):
     """Excel sheet 名不能含 \\ / * ? [ ] : ，替换为下划线并截断至 31 字符。"""
     for c in r'\/*?[]:':
@@ -601,6 +618,50 @@ def _series_colors(n: int) -> list[str]:
     return colors
 
 
+def _write_sweep_stats_sheet(wb, batch_entries, sources):
+    """新增统计汇总 sheet：首列为统计项名称，后续为各 batch，行为各字段统计值。"""
+    ws = wb.create_sheet(_sanitize_sheet_title("统计汇总"), 0)
+    headers = ["数据项", "统计类型"] + [name for name, _, _ in batch_entries]
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.font = HDR_FONT
+        cell.fill = HDR_FILL
+        cell.alignment = CENTER
+        cell.border = BORDER
+
+    stat_defs = [
+        ("Avg", lambda vals: (sum(vals) / len(vals)) if vals else None),
+        ("Max", lambda vals: max(vals) if vals else None),
+        ("P99", lambda vals: _percentile(vals, 0.99)),
+        ("P95", lambda vals: _percentile(vals, 0.95)),
+        ("P90", lambda vals: _percentile(vals, 0.90)),
+        ("P50", lambda vals: _percentile(vals, 0.50)),
+    ]
+
+    row_idx = 2
+    for col in COLUMNS:
+        metric_name = METRIC_SWEEP_TITLES.get(col, col)
+        for source in sources:
+            for stat_name, stat_fn in stat_defs:
+                ws.cell(row=row_idx, column=1, value=f"{metric_name} ({source})")
+                ws.cell(row=row_idx, column=2, value=stat_name)
+                ws.cell(row=row_idx, column=1).alignment = CENTER
+                ws.cell(row=row_idx, column=2).alignment = CENTER
+                for bi, (_name, prefill_rows, decode_rows_list) in enumerate(batch_entries):
+                    if source == "prefill":
+                        rows = prefill_rows
+                    else:
+                        di = int(source.split("_")[-1])
+                        rows = decode_rows_list[di] if di < len(decode_rows_list) else []
+                    vals = [r.get(col) for r in rows if r.get(col) is not None]
+                    value = stat_fn(vals)
+                    cell = ws.cell(row=row_idx, column=3 + bi, value=value if value is not None else "")
+                    cell.alignment = CENTER
+                row_idx += 1
+
+    _set_sheet_column_widths(ws, [COL_WIDTH_TIME, COL_WIDTH_INDEX] + [COL_WIDTH_DATA] * len(batch_entries))
+
+
 def build_sweep_excel(log_dir, batch_entries, sweep_filename):
     """
     批量场景：每个指标 × (prefill + decode_0 + decode_1 + ...) 一个 Sheet；每个 sheet 横轴 = index，
@@ -614,6 +675,7 @@ def build_sweep_excel(log_dir, batch_entries, sweep_filename):
 
     max_decodes = max(len(drl) for _, _, drl in batch_entries)
     sources = ["prefill"] + [f"decode_{i}" for i in range(max_decodes)]
+    _write_sweep_stats_sheet(wb, batch_entries, sources)
 
     for col in COLUMNS:
         title_base = METRIC_SWEEP_TITLES.get(col, col)

@@ -618,10 +618,48 @@ def _series_colors(n: int) -> list[str]:
     return colors
 
 
+def _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_list):
+    """
+    根据 source 取单个 batch 的序列与时间戳：
+    - prefill: 直接取 prefill_rows[col]
+    - decode_i: 直接取 decode_i[col]
+    - decode: 多路 decode 按 index 求和（仅多路场景使用）
+    """
+    if source == "prefill":
+        rows = prefill_rows
+        series = [r.get(col) for r in rows] if rows else []
+        timestamps = [r.get("timestamp", "") for r in rows] if rows else []
+        return series, timestamps
+
+    if source == "decode":
+        n_points = max((len(rows) for rows in decode_rows_list), default=0)
+        series = []
+        timestamps = []
+        for i in range(n_points):
+            vals = []
+            ts = ""
+            for rows in decode_rows_list:
+                if i < len(rows):
+                    v = rows[i].get(col)
+                    if v is not None:
+                        vals.append(v)
+                    if not ts:
+                        ts = rows[i].get("timestamp", "")
+            series.append(sum(vals) if vals else None)
+            timestamps.append(ts)
+        return series, timestamps
+
+    di = int(source.split("_")[-1])
+    rows = decode_rows_list[di] if di < len(decode_rows_list) else []
+    series = [r.get(col) for r in rows] if rows else []
+    timestamps = [r.get("timestamp", "") for r in rows] if rows else []
+    return series, timestamps
+
+
 def _write_sweep_stats_sheet(wb, batch_entries, sources):
-    """新增统计汇总 sheet：首列为统计项名称，后续为各 batch，行为各字段统计值。"""
+    """新增统计汇总 sheet：前3列为数据项/来源/统计类型，后续为各 batch 统计值。"""
     ws = wb.create_sheet(_sanitize_sheet_title("统计汇总"), 0)
-    headers = ["数据项", "统计类型"] + [name for name, _, _ in batch_entries]
+    headers = ["数据项", "来源", "统计类型"] + [name for name, _, _ in batch_entries]
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.font = HDR_FONT
@@ -643,23 +681,21 @@ def _write_sweep_stats_sheet(wb, batch_entries, sources):
         metric_name = METRIC_SWEEP_TITLES.get(col, col)
         for source in sources:
             for stat_name, stat_fn in stat_defs:
-                ws.cell(row=row_idx, column=1, value=f"{metric_name} ({source})")
-                ws.cell(row=row_idx, column=2, value=stat_name)
+                ws.cell(row=row_idx, column=1, value=metric_name)
+                ws.cell(row=row_idx, column=2, value=source)
+                ws.cell(row=row_idx, column=3, value=stat_name)
                 ws.cell(row=row_idx, column=1).alignment = CENTER
                 ws.cell(row=row_idx, column=2).alignment = CENTER
+                ws.cell(row=row_idx, column=3).alignment = CENTER
                 for bi, (_name, prefill_rows, decode_rows_list) in enumerate(batch_entries):
-                    if source == "prefill":
-                        rows = prefill_rows
-                    else:
-                        di = int(source.split("_")[-1])
-                        rows = decode_rows_list[di] if di < len(decode_rows_list) else []
-                    vals = [r.get(col) for r in rows if r.get(col) is not None]
+                    series, _ = _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_list)
+                    vals = [v for v in series if v is not None]
                     value = stat_fn(vals)
-                    cell = ws.cell(row=row_idx, column=3 + bi, value=value if value is not None else "")
+                    cell = ws.cell(row=row_idx, column=4 + bi, value=value if value is not None else "")
                     cell.alignment = CENTER
                 row_idx += 1
 
-    _set_sheet_column_widths(ws, [COL_WIDTH_TIME, COL_WIDTH_INDEX] + [COL_WIDTH_DATA] * len(batch_entries))
+    _set_sheet_column_widths(ws, [COL_WIDTH_DATA, COL_WIDTH_INDEX, COL_WIDTH_INDEX] + [COL_WIDTH_DATA] * len(batch_entries))
 
 
 def build_sweep_excel(log_dir, batch_entries, sweep_filename):
@@ -675,6 +711,8 @@ def build_sweep_excel(log_dir, batch_entries, sweep_filename):
 
     max_decodes = max(len(drl) for _, _, drl in batch_entries)
     sources = ["prefill"] + [f"decode_{i}" for i in range(max_decodes)]
+    if max_decodes > 1:
+        sources.append("decode")
     _write_sweep_stats_sheet(wb, batch_entries, sources)
 
     for col in COLUMNS:
@@ -683,20 +721,16 @@ def build_sweep_excel(log_dir, batch_entries, sweep_filename):
             sheet_title = _sanitize_sheet_title(f"{title_base}_{source}")
             ws = wb.create_sheet(sheet_title, len(wb.sheetnames))
             batch_series = []
-            first_batch_rows = None
+            first_batch_timestamps = None
             for _name, prefill_rows, decode_rows_list in batch_entries:
-                if source == "prefill":
-                    rows = prefill_rows
-                else:
-                    di = int(source.split("_")[-1])
-                    rows = decode_rows_list[di] if di < len(decode_rows_list) else []
-                if first_batch_rows is None:
-                    first_batch_rows = rows
-                batch_series.append([r.get(col) for r in rows] if rows else [])
+                series, timestamps = _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_list)
+                if first_batch_timestamps is None:
+                    first_batch_timestamps = timestamps
+                batch_series.append(series)
             n_points = max(len(s) for s in batch_series) if batch_series else 0
             if n_points == 0:
                 continue
-            timestamps = [first_batch_rows[i]["timestamp"] if first_batch_rows and i < len(first_batch_rows) else "" for i in range(n_points)]
+            timestamps = [first_batch_timestamps[i] if first_batch_timestamps and i < len(first_batch_timestamps) else "" for i in range(n_points)]
             indices_full = list(range(n_points))
             indices_sampled = _downsample_indices(n_points, MAX_CHART_POINTS)
             n_sampled = len(indices_sampled)

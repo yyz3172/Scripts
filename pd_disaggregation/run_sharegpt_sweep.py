@@ -54,6 +54,7 @@ class SweepConfig:
     vllm_venv: Path = VLLM_VENV
     tester_venv: Path = TESTER_VENV
     benchmark_dir: Path = BENCHMARK_DIR
+    max_tokens: int = 512
     proxy_sleep_s: int = 10
     round_cooldown_s: int = 5
 
@@ -112,8 +113,10 @@ def pd_mode_to_model_name(pd_mode: str) -> str:
     return model_part.lower().replace("-", "_")
 
 
-def patch_benchmark_config(config_py: Path, batch_size: int, pd_mode: str) -> None:
-    """替换配置中的 `batch_size` 与 `model`，其中 model 由 pd_mode 推导。"""
+def patch_benchmark_config(
+    config_py: Path, batch_size: int, pd_mode: str, max_tokens: int
+) -> None:
+    """替换配置中的 `batch_size`、`model`、`max_out_len`。"""
     text = config_py.read_text(encoding="utf-8")
     new, n_batch = re.subn(r"batch_size=\d*", f"batch_size={batch_size}", text)
     if n_batch == 0:
@@ -122,6 +125,9 @@ def patch_benchmark_config(config_py: Path, batch_size: int, pd_mode: str) -> No
     new, n_model = re.subn(r'model\s*=\s*"[^"]*"', f'model="{model_name}"', new)
     if n_model == 0:
         raise RuntimeError(f"未找到 model= 可替换项: {config_py}")
+    new, n_max_out = re.subn(r"max_out_len\s*=\s*\d+", f"max_out_len={max_tokens}", new)
+    if n_max_out == 0:
+        raise RuntimeError(f"未找到 max_out_len= 可替换项: {config_py}")
     config_py.write_text(new, encoding="utf-8")
 
 
@@ -138,7 +144,7 @@ def run_sharegpt_benchmark(
         log_sweep(sweep_log, f"ERROR: benchmark 配置不存在: {config_py}")
         return 1
 
-    patch_benchmark_config(config_py, batch_size, cfg.pd_mode)
+    patch_benchmark_config(config_py, batch_size, cfg.pd_mode, cfg.max_tokens)
     work_dir = f"sharegpt_{cfg.pd_mode}"
     ais_log = log_dir / "aisbench.log"
     activate = cfg.tester_venv / "bin" / "activate"
@@ -261,7 +267,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         default="200",
         help="逗号分隔的 batch 列表，如 \"60,80,120,200\", 当前默认\"200\"",
     )
-    
+    p.add_argument(
+        "--max_tokens",
+        type=int,
+        default=512,
+        help="写入 benchmark 配置中的 max_out_len（默认 512）",
+    )
+
     p.add_argument("--benchmark_dir", type=Path, default=BENCHMARK_DIR)
     args = p.parse_args(list(argv) if argv is not None else None)
 
@@ -276,6 +288,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         nic_name=nic_name,
         local_ip=local_ip,
         benchmark_dir=args.benchmark_dir.resolve(),
+        max_tokens=args.max_tokens,
     )
     return run_sweep(cfg)
 

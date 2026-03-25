@@ -8,8 +8,8 @@ vLLM Engine 指标解析与绘图
 （原始数据表 + Throughput / Running_Waiting / Cache 三类图，每类「原始 + 采样」两张图并排）。
 
 批量模式：输入目录下无日志、仅有子目录（如 batch_50, batch_60）时，每个子目录生成各自的
-vllm_engine_metrics_analysis.xlsx，并在父目录生成 vllm_engine_metrics_sweep.xlsx（7 指标 × prefill+decode，
-每 sheet 横轴 index、多子目录折线对比）。
+vllm_engine_metrics_analysis.xlsx，并在父目录生成 vllm_engine_metrics_sweep.xlsx（7 指标 × 各日志 stem，
+如 prefill、decode、decode_0；多路 decode 另有固定名称 all_decode 的聚合 sheet；每 sheet 横轴 index、多子目录折线对比）。
 
 用法：
   python vllm_engine_metrics_plot.py <log_dir> [--output 文件名.xlsx]
@@ -84,6 +84,9 @@ CHART_SWEEP_WIDTH = 24
 CHART_SWEEP_HEIGHT = 16
 
 # 汇总表（批量场景）指标显示名
+# sweep 中多路 decode 按 index 求和后的来源列名 / Sheet 后缀（非文件名拼接）
+AGGREGATE_DECODE_SOURCE = "all_decode"
+
 METRIC_SWEEP_TITLES = {
     "avg_prompt_throughput": "prompt throughput",
     "avg_generation_throughput": "generation throughput",
@@ -134,10 +137,10 @@ def _decode_multi_log_index(file_path):
 
 def load_prefill_decode(log_dir):
     """
-    从 log_dir 下读取 prefill 与 decode 日志，返回 (prefill_rows, decode_rows_list)。
-    - 1P1D：存在 decode.log 时只读该文件，返回 decode_rows_list = [decode_rows]。
-    - 1P多D：不存在 decode.log 时，枚举 decode_0.log、decode_1.log、… 按编号排序后分别加载，
-      每个文件单独成一份，返回 decode_rows_list = [decode_0_rows, decode_1_rows, ...]。
+    从 log_dir 下读取 prefill 与 decode 日志，返回 (prefill_rows, decode_rows_list, decode_labels)。
+    decode_labels[i] 为第 i 个 decode 日志文件名去掉 .log 后的名称（与磁盘一致，如 decode、decode_0）。
+    - 1P1D：存在 decode.log 时只读该文件。
+    - 1P多D：不存在 decode.log 时，枚举 decode_*.log 按编号排序后分别加载。
     不同 decode 视为不同数据源，不做合并。
     """
     log_dir = os.path.abspath(log_dir)
@@ -146,11 +149,13 @@ def load_prefill_decode(log_dir):
     prefill_rows = load_log_series(prefill_path)
     if os.path.isfile(decode_single):
         decode_rows_list = [load_log_series(decode_single)]
+        decode_labels = [os.path.splitext(os.path.basename(decode_single))[0]]
     else:
         pattern = os.path.join(log_dir, "decode_*.log")
         decode_files = sorted(glob.glob(pattern), key=_decode_multi_log_index)
         decode_rows_list = [load_log_series(path) for path in decode_files]
-    return prefill_rows, decode_rows_list
+        decode_labels = [os.path.splitext(os.path.basename(p))[0] for p in decode_files]
+    return prefill_rows, decode_rows_list, decode_labels
 
 
 def _dir_has_logs(path):
@@ -236,8 +241,8 @@ def _pad(rows, length, fill=None):
     return list(rows) + [fill] * (length - len(rows))
 
 
-def write_raw_sheet(wb, prefill_rows, decode_rows_list):
-    """写入原始数据：一个 Prefill sheet + 每个 decode 一份 sheet（Decode 原始数据 或 Decode_0/Decode_1 原始数据）。"""
+def write_raw_sheet(wb, prefill_rows, decode_rows_list, decode_labels):
+    """写入原始数据：Prefill sheet + 每个 decode 日志一份 sheet（sheet 名用日志文件名 stem）。"""
     # Prefill
     ws_prefill = wb.create_sheet("Prefill 原始数据", 0)
     for c, h in enumerate(RAW_HEADERS, 1):
@@ -253,8 +258,8 @@ def write_raw_sheet(wb, prefill_rows, decode_rows_list):
     _set_sheet_column_widths(ws_prefill, [COL_WIDTH_INDEX, COL_WIDTH_TIME] + [COL_WIDTH_DATA] * len(COLUMNS))
     # Decode：每个 decode 单独一个 sheet
     for di, decode_rows in enumerate(decode_rows_list):
-        sheet_name = "Decode 原始数据" if len(decode_rows_list) == 1 else f"Decode_{di} 原始数据"
-        ws_decode = wb.create_sheet(_sanitize_sheet_title(sheet_name), 1 + di)
+        stem = decode_labels[di] if di < len(decode_labels) else str(di)
+        ws_decode = wb.create_sheet(_sanitize_sheet_title(f"{stem} 原始数据"), 1 + di)
         for c, h in enumerate(RAW_HEADERS, 1):
             cell = ws_decode.cell(row=1, column=c, value=h)
             cell.font = HDR_FONT
@@ -345,7 +350,7 @@ def _write_data_block_aligned(ws, row0, headers, columns_subset, aligned_rows):
     return n_rows
 
 
-def _build_line_chart(ws, row0, n_rows, columns_subset, titles, chart_title, num_metrics, num_decodes, palette):
+def _build_line_chart(ws, row0, n_rows, columns_subset, titles, chart_title, num_metrics, num_decodes, palette, decode_labels):
     """根据已有数据区建折线图；每指标 1 个 prefill 列 + num_decodes 个 decode 列。"""
     time_cols = 1 + num_decodes
     data_start_col = 2 + time_cols
@@ -358,7 +363,11 @@ def _build_line_chart(ws, row0, n_rows, columns_subset, titles, chart_title, num
     chart.height = CHART_HEIGHT
     cats = Reference(ws, min_col=1, min_row=row0 + 1, max_row=row0 + n_rows)
     chart.set_categories(cats)
-    decode_labels = ["decode"] if num_decodes == 1 else [f"decode_{i}" for i in range(num_decodes)]
+    dlabels = (
+        list(decode_labels)
+        if len(decode_labels) == num_decodes
+        else list(decode_labels) + [str(i) for i in range(len(decode_labels), num_decodes)]
+    )
     for ci in range(num_metrics):
         base_col = data_start_col + ci * cols_per_metric
         ref_p = Reference(ws, min_col=base_col, min_row=row0, max_row=row0 + n_rows)
@@ -368,13 +377,13 @@ def _build_line_chart(ws, row0, n_rows, columns_subset, titles, chart_title, num
         for di in range(num_decodes):
             ref_d = Reference(ws, min_col=base_col + 1 + di, min_row=row0, max_row=row0 + n_rows)
             chart.add_data(ref_d, titles_from_data=True)
-            chart.series[-1].tx = SeriesLabel(v=f"{decode_labels[di]} {titles[ci]}")
+            chart.series[-1].tx = SeriesLabel(v=f"{dlabels[di]} {titles[ci]}")
             chart.series[-1].smooth = True
     _style_series_multi(chart, num_metrics, num_decodes, palette)
     return chart
 
 
-def _chart_data_sheet(wb, prefill_rows, decode_rows_list, name, columns_subset, titles):
+def _chart_data_sheet(wb, prefill_rows, decode_rows_list, decode_labels, name, columns_subset, titles):
     """
     一个 sheet 两张图：按时间对齐 prefill 与多路 decode，相近时刻的数据在同一行对比。
     原始数据图 + 采样图；表头含 prefill_time、decode_0_time/decode_1_time/... 及对应指标列。
@@ -394,16 +403,19 @@ def _chart_data_sheet(wb, prefill_rows, decode_rows_list, name, columns_subset, 
     aligned_sampled = [aligned[i] for i in indices_sampled]
     n_sampled = len(aligned_sampled)
 
+    dlabels = decode_labels if len(decode_labels) == n_decode else (
+        decode_labels + [str(i) for i in range(len(decode_labels), n_decode)]
+    )
     time_headers = ["index", "prefill_time"]
-    time_headers += ["decode_time"] if n_decode == 1 else [f"decode_{i}_time" for i in range(n_decode)]
+    time_headers += [f"{dlabels[0]}_time"] if n_decode == 1 else [f"{dlabels[di]}_time" for di in range(n_decode)]
     headers = list(time_headers)
     for col in columns_subset:
         headers.append(f"prefill_{col}")
         if n_decode == 1:
-            headers.append(f"decode_{col}")
+            headers.append(f"{dlabels[0]}_{col}")
         else:
             for di in range(n_decode):
-                headers.append(f"decode_{di}_{col}")
+                headers.append(f"{dlabels[di]}_{col}")
 
     ws = wb.create_sheet(name)
     num_metrics = len(columns_subset)
@@ -415,9 +427,13 @@ def _chart_data_sheet(wb, prefill_rows, decode_rows_list, name, columns_subset, 
     row0_sampled = row0_full + n_full + 2
     _write_data_block_aligned(ws, row0_sampled, headers, columns_subset, aligned_sampled)
 
-    chart1 = _build_line_chart(ws, row0_full, n_full, columns_subset, titles, f"{name} (原始数据)", num_metrics, n_decode, palette)
+    chart1 = _build_line_chart(
+        ws, row0_full, n_full, columns_subset, titles, f"{name} (原始数据)", num_metrics, n_decode, palette, dlabels
+    )
     ws.add_chart(chart1, "A1")
-    chart2 = _build_line_chart(ws, row0_sampled, n_sampled, columns_subset, titles, f"{name} (采样)", num_metrics, n_decode, palette)
+    chart2 = _build_line_chart(
+        ws, row0_sampled, n_sampled, columns_subset, titles, f"{name} (采样)", num_metrics, n_decode, palette, dlabels
+    )
     ws.add_chart(chart2, CHART2_ANCHOR)
     n_cols = len(headers)
     _set_sheet_column_widths(ws, [COL_WIDTH_INDEX] + [COL_WIDTH_TIME] * (1 + n_decode) + [COL_WIDTH_DATA] * (n_cols - 2 - n_decode))
@@ -462,12 +478,13 @@ def _style_series_multi(chart, num_metrics, num_decodes, colors):
         line.width = LINE_WIDTH_EMU
 
 
-def write_charts(wb, prefill_rows, decode_rows_list):
+def write_charts(wb, prefill_rows, decode_rows_list, decode_labels):
     """创建三张图的数据表并插入折线图（支持多路 decode）。"""
     _chart_data_sheet(
         wb,
         prefill_rows,
         decode_rows_list,
+        decode_labels,
         name="图1_Throughput",
         columns_subset=["avg_prompt_throughput", "avg_generation_throughput"],
         titles=["Avg prompt throughput (tokens/s)", "Avg generation throughput (tokens/s)"],
@@ -476,6 +493,7 @@ def write_charts(wb, prefill_rows, decode_rows_list):
         wb,
         prefill_rows,
         decode_rows_list,
+        decode_labels,
         name="图2_Running_Waiting",
         columns_subset=["running", "waiting"],
         titles=["Running (reqs)", "Waiting (reqs)"],
@@ -484,6 +502,7 @@ def write_charts(wb, prefill_rows, decode_rows_list):
         wb,
         prefill_rows,
         decode_rows_list,
+        decode_labels,
         name="图3_Cache",
         columns_subset=[
             "gpu_kv_cache_usage_pct",
@@ -498,17 +517,17 @@ def write_charts(wb, prefill_rows, decode_rows_list):
     )
 
 
-def _process_one_dir(log_dir, out_path, prefill_rows=None, decode_rows_list=None):
+def _process_one_dir(log_dir, out_path, prefill_rows=None, decode_rows_list=None, decode_labels=None):
     """处理单个目录并写入 Excel；返回 True 成功，False 无有效数据。若未传入则从 log_dir 加载。"""
-    if prefill_rows is None or decode_rows_list is None:
-        prefill_rows, decode_rows_list = load_prefill_decode(log_dir)
+    if prefill_rows is None or decode_rows_list is None or decode_labels is None:
+        prefill_rows, decode_rows_list, decode_labels = load_prefill_decode(log_dir)
     if not prefill_rows and not any(decode_rows_list):
         return False
     wb = openpyxl.Workbook()
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
-    write_raw_sheet(wb, prefill_rows, decode_rows_list)
-    write_charts(wb, prefill_rows, decode_rows_list)
+    write_raw_sheet(wb, prefill_rows, decode_rows_list, decode_labels)
+    write_charts(wb, prefill_rows, decode_rows_list, decode_labels)
     wb.save(out_path)
     return True
 
@@ -553,7 +572,7 @@ def _write_sweep_data_block(ws, row0, batch_series, batch_entries, indices, time
     ws.cell(row=row0, column=1, value="index")
     if timestamps is not None:
         ws.cell(row=row0, column=2, value="时间戳")
-    for bi, (name, _, _) in enumerate(batch_entries):
+    for bi, (name, _, _, _) in enumerate(batch_entries):
         ws.cell(row=row0, column=off + 1 + bi, value=name)
     for c in range(1, n_cols + 1):
         cell = ws.cell(row=row0, column=c)
@@ -618,12 +637,20 @@ def _series_colors(n: int) -> list[str]:
     return colors
 
 
-def _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_list):
+def _canonical_decode_labels(batch_entries):
+    """sweep 统一的 decode 来源名：取 decode 路数最多的 batch 的 decode_labels（顺序与文件一致）。"""
+    if not batch_entries:
+        return []
+    _name, _pr, _drl, labels = max(batch_entries, key=lambda x: len(x[2]))
+    return list(labels)
+
+
+def _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_list, decode_labels, aggregate_source_name):
     """
     根据 source 取单个 batch 的序列与时间戳：
-    - prefill: 直接取 prefill_rows[col]
-    - decode_i: 直接取 decode_i[col]
-    - decode: 多路 decode 按 index 求和（仅多路场景使用）
+    - prefill: prefill_rows[col]
+    - 与 decode_labels 中某项同名: 对应该日志
+    - aggregate_source_name: 该 batch 下所有 decode 日志按 index 求和
     """
     if source == "prefill":
         rows = prefill_rows
@@ -631,7 +658,7 @@ def _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_lis
         timestamps = [r.get("timestamp", "") for r in rows] if rows else []
         return series, timestamps
 
-    if source == "decode":
+    if aggregate_source_name and source == aggregate_source_name:
         n_points = max((len(rows) for rows in decode_rows_list), default=0)
         series = []
         timestamps = []
@@ -649,17 +676,19 @@ def _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_lis
             timestamps.append(ts)
         return series, timestamps
 
-    di = int(source.split("_")[-1])
+    if source not in decode_labels:
+        return [], []
+    di = decode_labels.index(source)
     rows = decode_rows_list[di] if di < len(decode_rows_list) else []
     series = [r.get(col) for r in rows] if rows else []
     timestamps = [r.get("timestamp", "") for r in rows] if rows else []
     return series, timestamps
 
 
-def _write_sweep_stats_sheet(wb, batch_entries, sources):
+def _write_sweep_stats_sheet(wb, batch_entries, sources, aggregate_source_name):
     """新增统计汇总 sheet：前3列为数据项/来源/统计类型，后续为各 batch 统计值。"""
     ws = wb.create_sheet(_sanitize_sheet_title("统计汇总"), 0)
-    headers = ["数据项", "来源", "统计类型"] + [name for name, _, _ in batch_entries]
+    headers = ["数据项", "来源", "统计类型"] + [name for name, _, _, _ in batch_entries]
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=c, value=h)
         cell.font = HDR_FONT
@@ -687,8 +716,10 @@ def _write_sweep_stats_sheet(wb, batch_entries, sources):
                 ws.cell(row=row_idx, column=1).alignment = CENTER
                 ws.cell(row=row_idx, column=2).alignment = CENTER
                 ws.cell(row=row_idx, column=3).alignment = CENTER
-                for bi, (_name, prefill_rows, decode_rows_list) in enumerate(batch_entries):
-                    series, _ = _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_list)
+                for bi, (_name, prefill_rows, decode_rows_list, decode_labels) in enumerate(batch_entries):
+                    series, _ = _get_source_series_and_timestamps(
+                        col, source, prefill_rows, decode_rows_list, decode_labels, aggregate_source_name
+                    )
                     vals = [v for v in series if v is not None]
                     value = stat_fn(vals)
                     cell = ws.cell(row=row_idx, column=4 + bi, value=value if value is not None else "")
@@ -700,8 +731,8 @@ def _write_sweep_stats_sheet(wb, batch_entries, sources):
 
 def build_sweep_excel(log_dir, batch_entries, sweep_filename):
     """
-    批量场景：每个指标 × (prefill + decode_0 + decode_1 + ...) 一个 Sheet；每个 sheet 横轴 = index，
-    纵轴 = 指标值，多列对比各 batch；含原始数据图 + 采样图。多路 decode 时每个 decode 单独一个 sheet。
+    批量场景：每个指标 × (prefill + 各 decode 日志 stem + 可选 all_decode 聚合) 一个 Sheet；
+    decode 来源名来自各子目录实际日志文件名（去掉 .log）；多路时另增一页 all_decode（各 decode 按 index 求和）。
     """
     if not batch_entries:
         return
@@ -709,11 +740,12 @@ def build_sweep_excel(log_dir, batch_entries, sweep_filename):
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
 
-    max_decodes = max(len(drl) for _, _, drl in batch_entries)
-    sources = ["prefill"] + [f"decode_{i}" for i in range(max_decodes)]
-    if max_decodes > 1:
-        sources.append("decode")
-    _write_sweep_stats_sheet(wb, batch_entries, sources)
+    canonical_labels = _canonical_decode_labels(batch_entries)
+    aggregate_source_name = AGGREGATE_DECODE_SOURCE if len(canonical_labels) > 1 else None
+    sources = ["prefill"] + list(canonical_labels)
+    if aggregate_source_name:
+        sources.append(aggregate_source_name)
+    _write_sweep_stats_sheet(wb, batch_entries, sources, aggregate_source_name)
 
     for col in COLUMNS:
         title_base = METRIC_SWEEP_TITLES.get(col, col)
@@ -722,8 +754,10 @@ def build_sweep_excel(log_dir, batch_entries, sweep_filename):
             ws = wb.create_sheet(sheet_title, len(wb.sheetnames))
             batch_series = []
             first_batch_timestamps = None
-            for _name, prefill_rows, decode_rows_list in batch_entries:
-                series, timestamps = _get_source_series_and_timestamps(col, source, prefill_rows, decode_rows_list)
+            for _name, prefill_rows, decode_rows_list, decode_labels in batch_entries:
+                series, timestamps = _get_source_series_and_timestamps(
+                    col, source, prefill_rows, decode_rows_list, decode_labels, aggregate_source_name
+                )
                 if first_batch_timestamps is None:
                     first_batch_timestamps = timestamps
                 batch_series.append(series)
@@ -767,12 +801,14 @@ def process_log_dir(log_dir, output_filename):
         if "sweep" in output_filename.lower():
             output_filename = "vllm_engine_metrics_analysis.xlsx"
         out_path = os.path.join(log_dir, output_filename)
-        prefill_rows, decode_rows_list = load_prefill_decode(log_dir)
+        prefill_rows, decode_rows_list, decode_labels = load_prefill_decode(log_dir)
         if not prefill_rows and not any(decode_rows_list):
             print("未解析到任何 Engine 指标行，请确认日志格式。")
             return 0
-        _process_one_dir(log_dir, out_path, prefill_rows, decode_rows_list)
-        decode_info = ", ".join(f"decode_{i}={len(dr)}" for i, dr in enumerate(decode_rows_list))
+        _process_one_dir(log_dir, out_path, prefill_rows, decode_rows_list, decode_labels)
+        decode_info = ", ".join(
+            f"{lab}={len(dr)}" for lab, dr in zip(decode_labels, decode_rows_list)
+        ) or "无 decode 日志"
         print(f"[单目录] {log_dir}")
         print(f"  Prefill 解析行数: {len(prefill_rows)}, {decode_info}")
         print(f"已保存: {out_path}")
@@ -784,15 +820,17 @@ def process_log_dir(log_dir, output_filename):
     for name in sorted(os.listdir(log_dir)):
         sub = os.path.join(log_dir, name)
         if os.path.isdir(sub) and _dir_has_logs(sub):
-            prefill_rows, decode_rows_list = load_prefill_decode(sub)
+            prefill_rows, decode_rows_list, decode_labels = load_prefill_decode(sub)
             if not prefill_rows and not any(decode_rows_list):
                 print(f"  [SKIP] {name} (无有效数据)")
                 continue
-            batch_list.append((name, prefill_rows, decode_rows_list))
+            batch_list.append((name, prefill_rows, decode_rows_list, decode_labels))
             per_batch_filename = f"{name}_{output_filename}" if not output_filename.startswith(name + "_") else output_filename
             out_path = os.path.join(sub, per_batch_filename)
-            _process_one_dir(sub, out_path, prefill_rows, decode_rows_list)
-            decode_info = ", ".join(f"d{i}={len(dr)}" for i, dr in enumerate(decode_rows_list))
+            _process_one_dir(sub, out_path, prefill_rows, decode_rows_list, decode_labels)
+            decode_info = ", ".join(
+                f"{lab}={len(dr)}" for lab, dr in zip(decode_labels, decode_rows_list)
+            ) or "无 decode"
             print(f"  [OK] {name} -> {per_batch_filename} (prefill={len(prefill_rows)}, {decode_info})")
     if not batch_list:
         print(f"错误：{log_dir} 下既无 prefill.log/decode.log，也无含日志的直接子目录。")

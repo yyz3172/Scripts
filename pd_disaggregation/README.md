@@ -1,6 +1,6 @@
 # PD 分离（Prefill / Decode）编排与结果分析
 
-本目录包含 **PD 分离推理** 的启停编排、ShareGPT 批量压测，以及压测日志的离线分析脚本。拓扑与脚本以 **`pd_service_ctl.py` 所在目录** 为根：`--pd_mode` 指向其下的子目录（如 `Qwen3-32B/1P2_2D2`、`Qwen3-8B/1P1_2D1`、`Qwen2-7B-Instruct/1P1_2D1`），内含 `run_prefill.sh`、`run_decode.sh`，若存在 `pd_proxy.py` 则可选负载均衡代理。
+本目录包含 **PD 分离推理** 的启停编排、ShareGPT 批量压测，以及压测日志的离线分析脚本。拓扑与脚本以 **`pd_service_ctl.py` 所在目录** 为根：`--pd_mode` 指向其下的子目录（如 `Qwen3-32B/1P2_2D2`、`Qwen3-8B/1P1_2D1`、`Qwen2-7B-Instruct/1P1_2D1`、`Qwen2-7B-Instruct/1P1_1D1`），内含 `run_prefill.sh`、`run_decode.sh`，若存在 `pd_proxy.py` 则可选负载均衡代理。
 
 ---
 
@@ -69,5 +69,6 @@ python throughput_concurrency_sweep_to_excel.py /path/to/run_dir
 - `Qwen3-32B/1P2_2D2`
 - `Qwen3-8B/1P1_2D1`
 - `Qwen2-7B-Instruct/1P1_2D1`
+- `Qwen2-7B-Instruct/1P1_1D1`
 
 各拓扑子目录均提供 **Prefill / Decode / 代理** 的启动脚本（`run_prefill.sh`、`run_decode.sh`、`pd_proxy.py`），由 `pd_service_ctl` 注入 `LOG_DIR`、`NIC_NAME`、`LOCAL_IP` 等环境变量后启动。具体设备映射、端口与模型参数以各目录脚本为准。

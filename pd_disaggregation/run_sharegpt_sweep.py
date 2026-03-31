@@ -29,9 +29,9 @@ from pd_service_ctl import PdRuntimeConfig, PdServiceCtl
 
 PKG_DIR = Path(__file__).resolve().parent
 
-VLLM_VENV = Path("/root/autodl-tmp/py_venv/vllm2")
+VLLM_VENV = Path("/root/autodl-tmp/py_venv/vllm")
 TESTER_VENV = Path("/root/autodl-tmp/py_venv/tester")
-BENCHMARK_DIR = Path("/root/autodl-tmp/code/benchmark")
+BENCHMARK_DIR = Path("/root/autodl-tmp/yyz/code/AISBench_benchmark")
 CONFIG_REL = Path("ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat_multiturn.py")
 LOG_ROOT = PKG_DIR / "logs"
 RUN_DIR_DEFAULT = LOG_ROOT / "sharegpt"

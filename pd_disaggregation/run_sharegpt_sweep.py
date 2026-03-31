@@ -7,8 +7,8 @@ PD 分离模式 ShareGPT 批量压测编排。
 prefill / decode 为 `./<pd-mode>/` 下 `run_prefill.sh`、`run_decode.sh`；代理为 `pd_proxy.py`。
 
 用法（任意 cwd）:
-  python .../run_sharegpt_sweep.py [--run_dir ...] [--pd_mode ...] [--nic_name ...] [--local_ip ...] [--batch_sizes ...] [--benchmark_dir ...]
-  ``--run_dir`` 为本趟输出根目录（默认 ``<脚本目录>/logs/sharegpt``），其下含 ``sweep.log``、``batch_*`` 等。
+  python .../run_sharegpt_sweep.py [--log_dir ...] [--pd_mode ...] [--nic_name ...] [--local_ip ...] [--batch_sizes ...] [--benchmark_dir ...]
+  ``--log_dir`` 为本趟日志/输出根目录（默认 ``<脚本目录>/logs/sharegpt``），其下含 ``sweep.log``、``batch_*`` 等。
   端口、venv、超时、代理等待等见 ``SweepConfig`` 默认值（与 ``pd_service_ctl`` 对齐）。
 """
 from __future__ import annotations
@@ -34,13 +34,13 @@ TESTER_VENV = Path("/root/autodl-tmp/py_venv/tester")
 BENCHMARK_DIR = Path("/root/autodl-tmp/yyz/code/AISBench_benchmark")
 CONFIG_REL = Path("ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat_multiturn.py")
 LOG_ROOT = PKG_DIR / "logs"
-RUN_DIR_DEFAULT = LOG_ROOT / "sharegpt"
+LOG_DIR_DEFAULT = LOG_ROOT / "sharegpt"
 
 
 @dataclass
 class SweepConfig:
     """本趟压测输出根目录（含 sweep.log、各 batch_* 子目录）。"""
-    run_dir: Path = RUN_DIR_DEFAULT
+    log_dir: Path = LOG_DIR_DEFAULT
     # 未显式指定时与 pd_service_ctl.PD_MODE 一致；CLI 传入则覆盖。
     pd_mode: str = pdctl.PD_MODE
     batch_sizes: List[int] = field(default_factory=lambda: [60, 80, 120, 200])
@@ -97,7 +97,7 @@ def _pd_rt(cfg: SweepConfig) -> PdRuntimeConfig:
 
 
 def _batch_log_dir(cfg: SweepConfig, batch_size: int) -> Path:
-    return cfg.run_dir / f"batch_{batch_size}"
+    return cfg.log_dir / f"batch_{batch_size}"
 
 
 def _sweep_log_fn(sweep_log: Path):
@@ -137,7 +137,7 @@ def run_sharegpt_benchmark(
     bench_port: int,
     sweep_log: Path,
 ) -> int:
-    log_dir = cfg.run_dir / f"batch_{batch_size}"
+    log_dir = cfg.log_dir / f"batch_{batch_size}"
     log_dir.mkdir(parents=True, exist_ok=True)
     config_py = cfg.benchmark_dir / CONFIG_REL
     if not config_py.is_file():
@@ -173,7 +173,7 @@ def parse_batch_sizes(s: str) -> List[int]:
 
 
 def run_sweep(cfg: SweepConfig) -> int:
-    sweep_log = cfg.run_dir / "sweep.log"
+    sweep_log = cfg.log_dir / "sweep.log"
     # 进入主循环前固定本趟 sweep 是否启用代理
     use_proxy_sweep = cfg.use_proxy
     logf = _sweep_log_fn(sweep_log)
@@ -190,7 +190,7 @@ def run_sweep(cfg: SweepConfig) -> int:
     log_sweep(
         sweep_log,
         "Sweep start (PD mode): "
-        f"RUN_DIR={cfg.run_dir} TOPO_DIR={cfg.topo_dir} "
+        f"LOG_DIR={cfg.log_dir} TOPO_DIR={cfg.topo_dir} "
         f"BATCH_SIZES={cfg.batch_sizes} USE_PROXY={use_proxy_sweep} "
         f"NIC_NAME={cfg.nic_name} LOCAL_IP={cfg.local_ip}",
     )
@@ -235,17 +235,17 @@ def run_sweep(cfg: SweepConfig) -> int:
         )
         time.sleep(cfg.round_cooldown_s)
 
-    log_sweep(sweep_log, f"All rounds completed. Logs: {cfg.run_dir}")
+    log_sweep(sweep_log, f"All rounds completed. Logs: {cfg.log_dir}")
     return 0
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     p = argparse.ArgumentParser(description="PD 分离 ShareGPT 批量压测编排")
     p.add_argument(
-        "--run_dir",
+        "--log_dir",
         type=Path,
-        default=RUN_DIR_DEFAULT,
-        help=f"本趟输出根目录（sweep.log、batch_* 等；默认 {RUN_DIR_DEFAULT}）",
+        default=LOG_DIR_DEFAULT,
+        help=f"本趟日志/输出根目录（sweep.log、batch_* 等；默认 {LOG_DIR_DEFAULT}）",
     )
     p.add_argument(
         "--nic_name",
@@ -282,7 +282,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     pd_mode = args.pd_mode if args.pd_mode is not None else pdctl.PD_MODE
 
     cfg = SweepConfig(
-        run_dir=args.run_dir.resolve(),
+        log_dir=args.log_dir.resolve(),
         pd_mode=pd_mode,
         batch_sizes=parse_batch_sizes(args.batch_sizes),
         nic_name=nic_name,

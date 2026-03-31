@@ -60,6 +60,7 @@ CHART_GROUPS = [
     ("TTFT(ms)", ["ttft_n", "ttft_avg", "ttft_max", "ttft_p99", "ttft_p95", "ttft_p90", "ttft_p50", "ttft_min"]),
     ("E2E(ms)", ["e2e_n", "e2e_avg", "e2e_max", "e2e_p99", "e2e_p95", "e2e_p90", "e2e_p50", "e2e_min"]),
     ("TPOT(ms)", ["tpot_n", "tpot_avg", "tpot_max", "tpot_p99", "tpot_p95", "tpot_p90", "tpot_p50", "tpot_min"]),
+    ("OutputTokens(tok)", ["output_tokens_n", "output_tokens_avg", "output_tokens_max", "output_tokens_p99", "output_tokens_p95", "output_tokens_p90", "output_tokens_p50", "output_tokens_min"]),
     ("TTFT_COT(ms)", ["ttft_cot_n", "ttft_cot_avg", "ttft_cot_max", "ttft_cot_p99", "ttft_cot_p95", "ttft_cot_p90", "ttft_cot_p50", "ttft_cot_min"]),
     ("E2E_COT(ms)", ["e2e_cot_n", "e2e_cot_avg", "e2e_cot_max", "e2e_cot_p99", "e2e_cot_p95", "e2e_cot_p90", "e2e_cot_p50", "e2e_cot_min"]),
 ]
@@ -139,7 +140,7 @@ class BatchStats:
     pred_none: int
     accuracy: Dict[str, Optional[float]]
     latency_ms: Dict[str, Dict[str, Any]]
-    # 仅针对 TTFT/E2E/TPOT，按 domain + sub_domain 分组的延迟统计
+    # 仅针对 TTFT/E2E/TPOT/OutputTokens，按 domain + sub_domain 分组统计
     # key: "<domain>\t<sub_domain>"
     latency_by_domain_sub: Dict[str, Dict[str, Dict[str, Any]]]
 
@@ -179,14 +180,16 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
     ttft_ms: List[Any] = []
     e2e_ms: List[Any] = []
     tpot_ms: List[Any] = []
+    output_tokens: List[Any] = []
     ttft_ms_cot: List[Any] = []
     e2e_ms_cot: List[Any] = []
 
     pred_none = 0
-    # TTFT/E2E/TPOT 按 domain/sub_domain 分组
+    # TTFT/E2E/TPOT/OutputTokens 按 domain/sub_domain 分组
     group_ttft: Dict[tuple[str, str], List[Any]] = {}
     group_e2e: Dict[tuple[str, str], List[Any]] = {}
     group_tpot: Dict[tuple[str, str], List[Any]] = {}
+    group_output_tokens: Dict[tuple[str, str], List[Any]] = {}
 
     for pred in pred_data:
         acc = float(bool(pred.get("judge")))
@@ -217,6 +220,8 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
             e2e_ms.append(pred.get("e2e_ms"))
         if "tpot_ms" in pred:
             tpot_ms.append(pred.get("tpot_ms"))
+        if "output_tokens" in pred:
+            output_tokens.append(pred.get("output_tokens"))
         if "ttft_ms_cot" in pred:
             ttft_ms_cot.append(pred.get("ttft_ms_cot"))
         if "e2e_ms_cot" in pred:
@@ -237,6 +242,10 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
             group_tpot.setdefault(gk, []).append(pred.get("tpot_ms"))
             group_tpot.setdefault((dom, "all"), []).append(pred.get("tpot_ms"))
             group_tpot.setdefault(("all", "all"), []).append(pred.get("tpot_ms"))
+        if "output_tokens" in pred:
+            group_output_tokens.setdefault(gk, []).append(pred.get("output_tokens"))
+            group_output_tokens.setdefault((dom, "all"), []).append(pred.get("output_tokens"))
+            group_output_tokens.setdefault(("all", "all"), []).append(pred.get("output_tokens"))
 
     overall = _pct(easy_acc + hard_acc, n)
     acc = {
@@ -251,12 +260,18 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
         "ttft": _summarize_latency(ttft_ms),
         "e2e": _summarize_latency(e2e_ms),
         "tpot": _summarize_latency(tpot_ms),
+        "output_tokens": _summarize_latency(output_tokens),
         "ttft_cot": _summarize_latency(ttft_ms_cot),
         "e2e_cot": _summarize_latency(e2e_ms_cot),
     }
 
     latency_by_domain_sub: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    all_groups = set(group_ttft.keys()) | set(group_e2e.keys()) | set(group_tpot.keys())
+    all_groups = (
+        set(group_ttft.keys())
+        | set(group_e2e.keys())
+        | set(group_tpot.keys())
+        | set(group_output_tokens.keys())
+    )
 
     def _gk_sort(x: tuple[str, str]) -> tuple[int, str, int, str]:
         d, s = x
@@ -269,6 +284,7 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
             "TTFT": _summarize_latency(group_ttft.get((dom, sub), [])),
             "E2E": _summarize_latency(group_e2e.get((dom, sub), [])),
             "TPOT": _summarize_latency(group_tpot.get((dom, sub), [])),
+            "OutputTokens": _summarize_latency(group_output_tokens.get((dom, sub), [])),
         }
 
     return BatchStats(
@@ -315,6 +331,7 @@ def _flatten_stats(s: BatchStats) -> Dict[str, Any]:
     _put("ttft", s.latency_ms.get("ttft", {}))
     _put("e2e", s.latency_ms.get("e2e", {}))
     _put("tpot", s.latency_ms.get("tpot", {}))
+    _put("output_tokens", s.latency_ms.get("output_tokens", {}))
     _put("ttft_cot", s.latency_ms.get("ttft_cot", {}))
     _put("e2e_cot", s.latency_ms.get("e2e_cot", {}))
     return out
@@ -325,6 +342,8 @@ def _metric_unit(key: str) -> str:
         return "%"
     if key in ("n", "pred_none"):
         return ""
+    if key.startswith("output_tokens_"):
+        return "tok"
     if key.endswith(("_avg", "_min", "_max", "_p50", "_p90", "_p95", "_p99")):
         # latency in ms
         return "ms"
@@ -378,6 +397,8 @@ def _split_metric_key(key: str) -> tuple[str, str]:
             return f"{prefix.upper()}_COT(ms)", sub2
         if prefix in ("ttft", "e2e", "tpot"):
             return f"{prefix.upper()}(ms)", sub
+        if key.startswith("output_tokens_"):
+            return "OUTPUT_TOKENS(tok)", key[len("output_tokens_") :]
     # fallback
     return key, ""
 
@@ -475,8 +496,8 @@ def write_excel(rows: List[Dict[str, Any]], stats: List[BatchStats], out_path: s
         chart.height = CHART_HEIGHT
         ws.add_chart(chart, f"A{(max(acc_rows) + 3)}")
 
-    # 额外：Latency（按 domain/sub_domain 分组）页 —— 4 列 + batch 列
-    ws_lat = wb.create_sheet(title="Latency")
+    # 额外：Performance（按 domain/sub_domain 分组）页 —— 4 列 + batch 列
+    ws_lat = wb.create_sheet(title="Performance")
     # 列顺序：domain / sub_domain / Metric / stat
     lat_headers = ["domain", "sub_domain", "Metric", "stat"]
     for i, h in enumerate(lat_headers, 1):
@@ -503,7 +524,8 @@ def write_excel(rows: List[Dict[str, Any]], stats: List[BatchStats], out_path: s
         return a, b
 
     stat_order = ["n", "avg", "max", "p99", "p95", "p90", "p50", "min"]
-    metrics = ["TTFT", "E2E", "TPOT"]
+    metrics = ["TTFT", "E2E", "TPOT", "OutputTokens"]
+    metric_unit = {"TTFT": "ms", "E2E": "ms", "TPOT": "ms", "OutputTokens": "tok"}
     rowi = 2
     def _sort_key(gk: str) -> tuple[int, str, int, str]:
         dom, sub = _split_gk(gk)
@@ -521,7 +543,7 @@ def write_excel(rows: List[Dict[str, Any]], stats: List[BatchStats], out_path: s
             for stat_name in stat_order:
                 ws_lat.cell(row=rowi, column=1, value=dom).border = BORDER_THIN
                 ws_lat.cell(row=rowi, column=2, value=sub).border = BORDER_THIN
-                ws_lat.cell(row=rowi, column=3, value=f"{metric}/ms").border = BORDER_THIN
+                ws_lat.cell(row=rowi, column=3, value=f"{metric}/{metric_unit.get(metric, '')}").border = BORDER_THIN
                 ws_lat.cell(row=rowi, column=4, value=stat_name).border = BORDER_THIN
                 for bi, d in enumerate(by_batch, 0):
                     val = (d.get(gk, {}).get(metric, {}) or {}).get(stat_name)
@@ -650,16 +672,17 @@ def main() -> int:
     print("-" * PRINT_SEP_WIDTH)
     print(
         f"{'batch':<16}  {'N':>6}  {'acc_overall(%)':>14}  "
-        f"{'ttft_avg(ms)':>12}  {'e2e_avg(ms)':>11}  {'tpot_avg(ms)':>11}"
+        f"{'ttft_avg(ms)':>12}  {'e2e_avg(ms)':>11}  {'tpot_avg(ms)':>11}  {'out_tok_avg':>11}"
     )
     print("-" * PRINT_SEP_WIDTH)
     for s in all_stats:
         ttft = s.latency_ms["ttft"]
         e2e = s.latency_ms["e2e"]
         tpot = s.latency_ms["tpot"]
+        out_tok = s.latency_ms["output_tokens"]
         print(
             f"{s.batch:<16}  {s.n:>6}  {_fmt(s.accuracy.get('overall'), 1):>14}  "
-            f"{_fmt(ttft.get('avg'), 0):>12}  {_fmt(e2e.get('avg'), 0):>11}  {_fmt(tpot.get('avg'), 2):>11}"
+            f"{_fmt(ttft.get('avg'), 0):>12}  {_fmt(e2e.get('avg'), 0):>11}  {_fmt(tpot.get('avg'), 2):>11}  {_fmt(out_tok.get('avg'), 1):>11}"
         )
     print("-" * PRINT_SEP_WIDTH)
 

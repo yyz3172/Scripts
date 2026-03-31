@@ -131,6 +131,14 @@ def patch_benchmark_config(
     config_py.write_text(new, encoding="utf-8")
 
 
+def _sanitize_for_path(s: str) -> str:
+    """将任意字符串转为适合目录名的形式（尽量稳定且可读）。"""
+    s = s.strip().replace("\\", "/")
+    s = re.sub(r"[^\w.\-]+", "_", s)
+    s = s.strip("_")
+    return s or "run"
+
+
 def run_sharegpt_benchmark(
     cfg: SweepConfig,
     batch_size: int,
@@ -144,27 +152,35 @@ def run_sharegpt_benchmark(
         log_sweep(sweep_log, f"ERROR: benchmark 配置不存在: {config_py}")
         return 1
 
-    patch_benchmark_config(config_py, batch_size, cfg.pd_mode, cfg.max_tokens)
-    work_dir = f"sharegpt_{cfg.pd_mode}"
-    ais_log = log_dir / "aisbench.log"
-    activate = cfg.tester_venv / "bin" / "activate"
-    if not activate.is_file():
-        log_sweep(sweep_log, f"ERROR: tester venv 不存在: {activate}")
-        return 1
+    # 注意：config_py 位于 benchmark 仓库内，是共享状态；本轮结束必须恢复，避免污染后续实验。
+    orig_cfg_text = config_py.read_text(encoding="utf-8")
+    try:
+        patch_benchmark_config(config_py, batch_size, cfg.pd_mode, cfg.max_tokens)
+        work_dir = f"sharegpt_{_sanitize_for_path(cfg.pd_mode)}"
+        ais_log = log_dir / "aisbench.log"
+        activate = cfg.tester_venv / "bin" / "activate"
+        if not activate.is_file():
+            log_sweep(sweep_log, f"ERROR: tester venv 不存在: {activate}")
+            return 1
 
-    inner = f"""
+        inner = f"""
 set -euo pipefail
 export VLLM_PORT="{bench_port}"
 source "{activate}"
 cd "{cfg.benchmark_dir}"
 ais_bench --models vllm_api_stream_chat_multiturn --datasets sharegpt_gen --mode perf --num-warmups 0 --work-dir "outputs/{work_dir}/" >> "{ais_log}" 2>&1
 """
-    log_sweep(
-        sweep_log,
-        f"Running sharegpt benchmark (BATCH_SIZE={batch_size}, port={bench_port})...",
-    )
-    r = subprocess.run(["/bin/bash", "-c", inner], cwd=str(cfg.benchmark_dir))
-    return r.returncode
+        log_sweep(
+            sweep_log,
+            f"Running sharegpt benchmark (BATCH_SIZE={batch_size}, port={bench_port})...",
+        )
+        r = subprocess.run(["/bin/bash", "-c", inner], cwd=str(cfg.benchmark_dir))
+        return r.returncode
+    finally:
+        try:
+            config_py.write_text(orig_cfg_text, encoding="utf-8")
+        except OSError as e:
+            log_sweep(sweep_log, f"WARNING: benchmark 配置恢复失败: {config_py} ({e})")
 
 
 def parse_batch_sizes(s: str) -> List[int]:

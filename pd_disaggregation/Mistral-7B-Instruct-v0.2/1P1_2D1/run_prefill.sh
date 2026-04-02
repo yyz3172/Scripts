@@ -50,6 +50,7 @@ run_prefill() {
 vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
+    --enable-prefix-caching \
     --tensor-parallel-size 1 \
     --seed 1024 \
     --served-model-name mistral_7b_instruct_v0_2 \

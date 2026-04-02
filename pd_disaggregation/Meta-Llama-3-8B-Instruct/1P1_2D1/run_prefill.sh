@@ -51,6 +51,7 @@ run_prefill() {
 vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
+    --enable-prefix-caching \
     --tensor-parallel-size 1 \
     --seed 1024 \
     --served-model-name meta_llama3_8b_instruct \

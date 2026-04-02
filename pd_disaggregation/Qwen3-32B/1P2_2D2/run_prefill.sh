@@ -53,6 +53,7 @@ run_prefill() {
 vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
+    --enable-prefix-caching \
     --tensor-parallel-size 2 \
     --seed 1024 \
     --served-model-name qwen3_32b \

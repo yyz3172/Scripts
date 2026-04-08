@@ -54,22 +54,24 @@ run_one() {
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
     export VLLM_WORKER_MULTIPROC_METHOD="fork"
-    export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
+    # vLLM 0.13：若传 --data-parallel-rank 且 data_parallel_size=1，会强制 external_lb 并触发
+    # ParallelConfig 校验失败。单 Decode（dp_size=1）勿传 DP CLI，与 1P2_1D1/run_decode.sh 一致。
+    if [ "$dp_size" -gt 1 ]; then
+        export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
+    else
+        export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=0
+    fi
 
     LOG_DIR="${LOG_DIR:-.}"
     mkdir -p "$LOG_DIR"
     exec >> "${LOG_DIR}/decode.log" 2>&1
 
+    # dp_size=1：不传 --data-parallel-*（见上）。若日后多 D，在 dp_size>1 时追加与 1P1_2D1 相同的一组参数。
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $engine_port \
         --tensor-parallel-size 2 \
         --nnodes 1 \
-        --data-parallel-size $dp_size \
-        --data-parallel-rank $dp_rank \
-        --data-parallel-address $dp_ip \
-        --data-parallel-rpc-port $dp_rpc_port \
-        --data-parallel-size-local 1 \
         --seed 1024 \
         --served-model-name mistral_7b_instruct_v0_2 \
         --dtype bfloat16 \

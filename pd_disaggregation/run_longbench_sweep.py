@@ -250,6 +250,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         help=f"本趟日志/输出根目录（sweep.log、batch_* 等；默认 {LOG_DIR_DEFAULT}）",
     )
     p.add_argument(
+        "--vllm_venv",
+        type=Path,
+        default=None,
+        help=f"vLLM 虚拟环境目录（默认未指定时用 {VLLM_VENV}）",
+    )
+    p.add_argument(
         "--nic_name",
         default=None,
         help=f"网卡名（默认未指定时用 pd_service_ctl 的 NIC_NAME，当前为 {pdctl.NIC_NAME!r}）",
@@ -282,6 +288,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     p.add_argument("--pred_py", type=Path, default=PRED_PY_DEFAULT)
     args = p.parse_args(list(argv) if argv is not None else None)
 
+    vllm_venv = args.vllm_venv.resolve() if args.vllm_venv is not None else VLLM_VENV
     nic_name = args.nic_name if args.nic_name is not None else pdctl.NIC_NAME
     local_ip = args.local_ip if args.local_ip is not None else pdctl.LOCAL_IP
     pd_mode = args.pd_mode if args.pd_mode is not None else pdctl.PD_MODE
@@ -293,6 +300,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         batch_sizes=parse_int_list(batch_sizes_s),
         nic_name=nic_name,
         local_ip=local_ip,
+        vllm_venv=vllm_venv,
         longbench_dir=args.longbench_dir.resolve(),
         pred_py=args.pred_py.resolve(),
         data_path=args.data_path,

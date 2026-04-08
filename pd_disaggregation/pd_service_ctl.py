@@ -15,6 +15,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -550,6 +551,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="prefill/decode/proxy 日志目录（默认当前目录下 logs/）",
     )
     p_start.add_argument(
+        "--vllm_venv",
+        type=Path,
+        default=VLLM_VENV,
+        help="vLLM 所在虚拟环境目录（默认 /root/autodl-tmp/py_venv/vllm）",
+    )
+    p_start.add_argument(
         "--nic_name",
         default=NIC_NAME,
         help="注入脚本 HCCL/GLOO 等所用网卡名（默认与模块常量 NIC_NAME 一致）",
@@ -571,7 +578,7 @@ def _runtime_from_args(args: argparse.Namespace) -> PdRuntimeConfig:
     topo = (PKG_DIR / rel).resolve()
     return PdRuntimeConfig(
         topo_dir=topo,
-        vllm_venv=VLLM_VENV.resolve(),
+        vllm_venv=Path(args.vllm_venv).resolve(),
         pd_mode=args.pd_mode,
         nic_name=args.nic_name,
         local_ip=args.local_ip,

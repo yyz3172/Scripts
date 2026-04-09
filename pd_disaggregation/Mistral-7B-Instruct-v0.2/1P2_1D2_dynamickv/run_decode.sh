@@ -62,15 +62,6 @@ run_one() {
     mkdir -p "$LOG_DIR"
     exec >> "${LOG_DIR}/decode.log" 2>&1
 
-    echo "[envcheck] which python: $(command -v python || true)"
-    echo "[envcheck] which vllm: $(command -v vllm || true)"
-    echo "[envcheck] PYTHONPATH=${PYTHONPATH:-}"
-    python -c "import sys, importlib.util; print('[envcheck] sys.executable=', sys.executable); \
-print('[envcheck] sys.path[0:8]=', sys.path[0:8]); \
-s=importlib.util.find_spec('vllm_ascend'); print('[envcheck] vllm_ascend=', getattr(s,'origin',None)); \
-s2=importlib.util.find_spec('vllm_ascend.distributed.mooncake_connector'); print('[envcheck] mooncake_connector=', getattr(s2,'origin',None)); \
-s3=importlib.util.find_spec('vllm'); print('[envcheck] vllm=', getattr(s3,'origin',None));" || true
-
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $engine_port \

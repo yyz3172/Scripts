@@ -184,7 +184,7 @@ class PdRuntimeConfig:
     prefill_port: int = 9000
     vllm_port: int = 9010
     proxy_sleep_s: int = 10
-    ready_timeout_s: int = 300
+    ready_timeout_s: int = 150
     nic_name: str = NIC_NAME
     local_ip: str = LOCAL_IP
 

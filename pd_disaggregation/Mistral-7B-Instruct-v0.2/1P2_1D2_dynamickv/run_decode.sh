@@ -82,8 +82,8 @@ run_one() {
             "dynamic_kv": {
                 "enabled": true,
                 "model_types": ["mistral"],
-                "window": 16,
-                "max_capacity": 512,
+                "window": 256,
+                "max_capacity": 1024,
                 "pooling": "none",
                 "kernel_size": 1
             }

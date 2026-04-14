@@ -239,6 +239,16 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _read_pid_file(pid_file: Path) -> Optional[int]:
+    if not pid_file.is_file():
+        return None
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
 def _direct_child_pids(pid: int) -> list[int]:
     """列出 ``pid`` 的直接子进程（Linux ``pgrep -P``）。"""
     try:
@@ -365,6 +375,63 @@ class PdServiceCtl:
         self._log(f"ERROR: {name} 在 {t}s 内未就绪。")
         return False
 
+    def _is_port_ready(self, port: int) -> bool:
+        url = f"http://localhost:{port}/health"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                return resp.status == 200
+        except (urllib.error.URLError, OSError):
+            return False
+
+    def wait_for_ports(self, ports: list[tuple[int, str]], *, timeout_s: Optional[int] = None) -> bool:
+        """
+        等待多个端口就绪（共享超时窗口）。
+
+        用于并行拉起场景：prefill/decode 都已启动，但 readiness 需要统一等待。
+        """
+        t = self._rt.ready_timeout_s if timeout_s is None else timeout_s
+        names = ", ".join([f"{n}:{p}" for p, n in ports])
+        self._log(f"等待端口就绪（{names}，共享超时 {t}s）...")
+        deadline = time.time() + t
+        step = 2.0
+        ready: dict[int, bool] = {p: False for p, _ in ports}
+        while time.time() < deadline:
+            changed = False
+            for p, _n in ports:
+                if ready[p]:
+                    continue
+                if self._is_port_ready(p):
+                    ready[p] = True
+                    changed = True
+            if all(ready.values()):
+                self._log("端口均已就绪。")
+                return True
+            if changed:
+                not_ready = ", ".join([f"{n}:{p}" for p, n in ports if not ready[p]])
+                self._log(f"仍未就绪: {not_ready}")
+            time.sleep(step)
+        not_ready = ", ".join([f"{n}:{p}" for p, n in ports if not ready[p]])
+        self._log(f"ERROR: 在 {t}s 内未全部就绪，仍未就绪: {not_ready}")
+        return False
+
+    def _ensure_pid_alive(self, pid_file: Path, name: str, *, grace_s: float = 2.0) -> bool:
+        """
+        启动后快速校验：pid 文件存在且进程未立刻退出。
+
+        端口 readiness（/health）由 ``wait_for_port`` 负责。
+        """
+        pid = _read_pid_file(pid_file)
+        if pid is None:
+            self._log(f"ERROR: {name} 启动后未生成 pid 文件: {pid_file}")
+            return False
+        t0 = time.time()
+        while time.time() - t0 < grace_s:
+            if _pid_alive(pid):
+                return True
+            time.sleep(0.1)
+        self._log(f"ERROR: {name} 进程疑似已退出（pid={pid}）")
+        return False
+
     def start_prefill(self, log_dir: Path) -> None:
         log_dir = log_dir.resolve()
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -473,7 +540,8 @@ echo $! > "{PID_DECODE}"
         log_dir: Path,
         *,
         with_proxy: Optional[bool] = None,
-        wait_ready: bool = True,
+        ready_timeout_s: Optional[int] = None,
+        start_mode: str = "serial",
     ) -> int:
         """
         顺序启动 prefill → decode →（可选）代理。
@@ -491,29 +559,78 @@ echo $! > "{PID_DECODE}"
             self._log("ERROR: 指定了代理但当前拓扑无 pd_proxy.py")
             return 1
 
-        try:
-            self._log("启动 prefill...")
-            self.start_prefill(log_dir)
-        except (FileNotFoundError, subprocess.CalledProcessError) as e:
-            self._log(f"ERROR: prefill 启动失败: {e}")
-            self.stop_vllm()
+        if start_mode not in ("serial", "parallel"):
+            self._log(f"ERROR: 不支持的 start_mode={start_mode!r}（仅支持 serial/parallel）")
             return 1
 
-        if wait_ready and not self.wait_for_port(self._rt.prefill_port, "prefill"):
-            self.stop_vllm()
-            return 1
+        t = self._rt.ready_timeout_s if ready_timeout_s is None else ready_timeout_s
 
-        try:
-            self._log("启动 decode...")
-            self.start_decode(log_dir)
-        except (FileNotFoundError, subprocess.CalledProcessError) as e:
-            self._log(f"ERROR: decode 启动失败: {e}")
-            self.stop_vllm()
-            return 1
+        if start_mode == "serial":
+            try:
+                self._log("启动 prefill...")
+                self.start_prefill(log_dir)
+            except (FileNotFoundError, subprocess.CalledProcessError) as e:
+                self._log(f"ERROR: prefill 启动失败: {e}")
+                self.stop_vllm()
+                return 1
 
-        if wait_ready and not self.wait_for_port(self._rt.vllm_port, "decode"):
-            self.stop_vllm()
-            return 1
+            if not self._ensure_pid_alive(PID_PREFILL, "prefill"):
+                self.stop_vllm()
+                return 1
+
+            if ready_timeout_s != 0:
+                if not self.wait_for_port(self._rt.prefill_port, "prefill", timeout_s=t):
+                    self.stop_vllm()
+                    return 1
+
+            try:
+                self._log("启动 decode...")
+                self.start_decode(log_dir)
+            except (FileNotFoundError, subprocess.CalledProcessError) as e:
+                self._log(f"ERROR: decode 启动失败: {e}")
+                self.stop_vllm()
+                return 1
+
+            if not self._ensure_pid_alive(PID_DECODE, "decode"):
+                self.stop_vllm()
+                return 1
+
+            if ready_timeout_s != 0:
+                if not self.wait_for_port(self._rt.vllm_port, "decode", timeout_s=t):
+                    self.stop_vllm()
+                    return 1
+        else:
+            # parallel: 不等待 prefill readiness，就直接拉起 decode；然后统一等待两个端口就绪
+            try:
+                self._log("并行拉起：启动 prefill...")
+                self.start_prefill(log_dir)
+            except (FileNotFoundError, subprocess.CalledProcessError) as e:
+                self._log(f"ERROR: prefill 启动失败: {e}")
+                self.stop_vllm()
+                return 1
+
+            try:
+                self._log("并行拉起：启动 decode...")
+                self.start_decode(log_dir)
+            except (FileNotFoundError, subprocess.CalledProcessError) as e:
+                self._log(f"ERROR: decode 启动失败: {e}")
+                self.stop_vllm()
+                return 1
+
+            if not self._ensure_pid_alive(PID_PREFILL, "prefill"):
+                self.stop_vllm()
+                return 1
+            if not self._ensure_pid_alive(PID_DECODE, "decode"):
+                self.stop_vllm()
+                return 1
+
+            if ready_timeout_s != 0:
+                if not self.wait_for_ports(
+                    [(self._rt.prefill_port, "prefill"), (self._rt.vllm_port, "decode")],
+                    timeout_s=t,
+                ):
+                    self.stop_vllm()
+                    return 1
 
         if wp:
             try:
@@ -524,6 +641,9 @@ echo $! > "{PID_DECODE}"
                 self.stop(use_proxy=True)
                 return 1
             time.sleep(self._rt.proxy_sleep_s)
+            if not self._ensure_pid_alive(PID_PROXY, "proxy", grace_s=0.1):
+                self.stop(use_proxy=True)
+                return 1
 
         self._log(f"PD 服务已拉起，日志目录: {log_dir}")
         return 0
@@ -566,7 +686,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=LOCAL_IP,
         help="本机可达 IP：NPU 面 HCCL_IF_IP 与代理连 prefill/decode 的 host（默认 LOCAL_IP 常量）",
     )
-    p_start.add_argument("--no_wait", action="store_true", help="不等待 /health")
+    p_start.add_argument(
+        "--start_mode",
+        choices=("serial", "parallel"),
+        default="serial",
+        help="组件拉起模式：serial=串行（prefill ready 后再起 decode）；parallel=并行（prefill/decode 都拉起后再统一等 ready）",
+    )
 
     sub.add_parser("stop", help="停止代理（若曾启动）与 decode、prefill")
 
@@ -599,7 +724,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     rt = _runtime_from_args(args)
     ctl = PdServiceCtl(rt, log=log_default)
     log_dir = Path(args.log_dir).resolve()
-    return ctl.start_stack(log_dir, with_proxy=None, wait_ready=not args.no_wait)
+    return ctl.start_stack(log_dir, with_proxy=None, ready_timeout_s=None, start_mode=args.start_mode)
 
 
 if __name__ == "__main__":

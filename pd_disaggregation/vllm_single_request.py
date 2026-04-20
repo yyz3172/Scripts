@@ -3,7 +3,7 @@
 
 默认走 POST {base_url}/chat/completions；也可用 --completions 走 {base_url}/completions。
 
--p / --prompt 支持内置模板：写成 @预设名（如 -p @zh），自由文本不要加 @。
+-p / --prompt 支持内置模板：写成 @预设名（如 -p @short），自由文本不要加 @。
   预设列表见 --list-prompts。
 
 环境变量（可被命令行覆盖）：
@@ -22,25 +22,21 @@ from collections.abc import Callable
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 
-# -p @<key> 选用；key 为自由文本时不要用 @ 前缀
-PROMPT_PRESETS: dict[str, str] = {
-    "short": "1+1等于几？只回答最终数字，不要其它解释。",
-    "code": (
-        "用 Python 写一个函数 `def is_prime(n: int) -> bool:`，判断正整数 n 是否为质数。"
-        "只输出一个 Markdown 代码块，不要额外说明。"
-    ),
-    "repeat": "请只输出这一行原文，不要加引号或前后缀：VLLM_SINGLE_REQ_PING",
-}
+PresetValue = str | Callable[[], str]
 
 # 长上下文预设 @long20k：主体目标字数（多句拼接，减少「重复句」被分词极度压缩的情况）
 # 20k tokens 为粗估
 LONG20k_BODY_TARGET_CHARS = 22_000
 
 
-def _build_preset_long20k() -> str:
-    header = (
+def _build_preset_long20k(*, tail_header: bool = False) -> str:
+    preamble_first = (
         "以下为长上下文压测文本：由多段互不相同的说明轮换拼接。请通读全文后，仅用「是」或「否」回答文末问题。\n\n"
     )
+    preamble_last = (
+        "以上为长上下文压测文本：由多段互不相同的说明轮换拼接。请通读全文后，仅用「是」或「否」回答文末问题。\n\n"
+    )
+    preamble = preamble_last if tail_header else preamble_first
     phrases = (
         "大模型推理分为预填充与解码两阶段；预填充对整段提示做单次前向并写入KV缓存。",
         "PagedAttention 将KV分页存放以降低显存碎片并提高批内并行度。",
@@ -74,25 +70,55 @@ def _build_preset_long20k() -> str:
         total += len(s)
         i += 1
     body = "".join(parts)[:LONG20k_BODY_TARGET_CHARS]
-    footer = (
-        "\n\n问题：上文是否明确论及「预填充」与「KV缓存」或同类键值缓存机制？只回答是或否。"
-    )
-    return header + body + footer
+    footer_first = "\n\n问题：下文是否明确论及「预填充」与「KV缓存」或同类键值缓存机制？只回答是或否。\n\n"
+    footer_last = "\n\n问题：以上内容是否明确论及「预填充」与「KV缓存」或同类键值缓存机制？只回答是或否。"
+    footer = footer_last if tail_header else footer_first
+    if tail_header:
+        # 对比组：正文在前，说明与问题在末尾附近（问题紧跟说明）。
+        return body + "\n\n" + preamble + footer
+    # 对比组：说明与问题在开头，正文在后（问题紧跟说明）。
+    return preamble + footer + body
 
 
-PRESET_BUILDERS: dict[str, Callable[[], str]] = {"long20k": _build_preset_long20k}
+def _build_preset_long20k_question_first() -> str:
+    return _build_preset_long20k(tail_header=False)
+
+
+def _build_preset_long20k_question_last() -> str:
+    return _build_preset_long20k(tail_header=True)
+
+
+# -p @<key> 选用；key 为自由文本时不要用 @ 前缀
+# 把所有内置模板集中在一个注册表里：字符串模板与运行时生成模板共用同一入口，便于维护与列出。
+PRESETS: dict[str, PresetValue] = {
+    # 短模板
+    "short": "1+1等于几？只回答最终数字，不要其它解释。",
+    "code": (
+        "用 Python 写一个函数 `def is_prime(n: int) -> bool:`，判断正整数 n 是否为质数。"
+        "只输出一个 Markdown 代码块，不要额外说明。"
+    ),
+    "repeat": "请只输出这一行原文，不要加引号或前后缀：VLLM_SINGLE_REQ_PING",
+    # 长上下文压测：对比「问题在前」vs「问题在后」
+    "long20k_question_first": _build_preset_long20k_question_first,
+    "long20k_question_last": _build_preset_long20k_question_last,
+}
 
 
 def _all_preset_keys() -> list[str]:
-    return sorted(set(PROMPT_PRESETS) | set(PRESET_BUILDERS))
+    return sorted(PRESETS)
 
 
 def _epilog_presets() -> str:
-    rows = [
-        f"{k} — {v[:48]}{'…' if len(v) > 48 else ''}" for k, v in sorted(PROMPT_PRESETS.items())
-    ]
+    rows: list[str] = []
+    for k, v in sorted(PRESETS.items()):
+        if isinstance(v, str):
+            rows.append(f"{k} — {v[:48]}{'…' if len(v) > 48 else ''}")
+    # 生成型模板单独给出更稳定的说明（避免预览文本随实现细节变化）
     rows.append(
-        f"long20k — 运行时拼接多段不同说明至约 {LONG20k_BODY_TARGET_CHARS} 字主体，目标约 20k tokens（以分词器为准）"
+        f"long20k_question_first — 约 {LONG20k_BODY_TARGET_CHARS} 字主体；preamble+问题在前，正文在后（问题紧跟说明）"
+    )
+    rows.append(
+        f"long20k_question_last — 同主体；正文在前，preamble+问题在后（问题紧跟说明）"
     )
     rows.sort()
     return "内置提示（-p @<key>）：\n  " + "\n  ".join(rows)
@@ -102,10 +128,11 @@ def resolve_prompt(prompt: str) -> str:
     if not prompt.startswith("@") or prompt == "@":
         return prompt
     key = prompt[1:]
-    if key in PRESET_BUILDERS:
-        return PRESET_BUILDERS[key]()
-    if key in PROMPT_PRESETS:
-        return PROMPT_PRESETS[key]
+    preset = PRESETS.get(key)
+    if callable(preset):
+        return preset()
+    if isinstance(preset, str):
+        return preset
     names = ", ".join(_all_preset_keys())
     print(f"错误：未知内置提示 @{key}。可用：{names}", file=sys.stderr)
     raise SystemExit(2)
@@ -127,7 +154,7 @@ def _post_json(url: str, payload: dict, api_key: str, timeout: float) -> dict:
 
 
 def main() -> int:
-    preset_help = f"用户消息；写 @预设名 使用内置模板（如 @zh、@code），预设见 --list-prompts"
+    preset_help = "用户消息；写 @预设名 使用内置模板（如 @short、@code），预设见 --list-prompts"
     p = argparse.ArgumentParser(
         description="单点请求 vLLM OpenAI 兼容 API",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -142,7 +169,7 @@ def main() -> int:
     p.add_argument(
         "--prompt",
         "-p",
-        default="@zh",
+        default="@short",
         metavar="TEXT|@PRESET",
         help=preset_help,
     )
@@ -165,15 +192,16 @@ def main() -> int:
 
     if args.list_prompts:
         for key in _all_preset_keys():
-            if key in PRESET_BUILDERS:
-                text = PRESET_BUILDERS[key]()
+            preset = PRESETS[key]
+            if callable(preset):
+                text = preset()
                 print(f"=== @{key} ===（共 {len(text)} 字符；完整正文过长，仅首尾预览）")
                 print(text[:400])
                 print("\n...\n")
                 print(text[-400:])
                 print()
             else:
-                print(f"=== @{key} ===\n{PROMPT_PRESETS[key]}\n")
+                print(f"=== @{key} ===\n{preset}\n")
         return 0
 
     user_text = resolve_prompt(args.prompt)

@@ -221,6 +221,16 @@ def _bash_start_background(
     inner = f"""
 set -euo pipefail
 source "{venv_activate}"
+# Some activate scripts (or cluster env) export invalid thread vars like "false",
+# which makes torch/torch_npu abort at import time. Force safe integers after
+# activating the venv.
+export OMP_NUM_THREADS="${{OMP_NUM_THREADS:-1}}"
+export MKL_NUM_THREADS="${{MKL_NUM_THREADS:-1}}"
+export OPENBLAS_NUM_THREADS="${{OPENBLAS_NUM_THREADS:-1}}"
+for k in OMP_NUM_THREADS MKL_NUM_THREADS OPENBLAS_NUM_THREADS; do
+  v="${{!k}}"
+  if [[ ! "$v" =~ ^[0-9]+$ ]]; then export "$k"=1; fi
+done
 set -m
 nohup {launcher} {redir} &
 echo $! > "{pid_file}"

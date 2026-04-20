@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """向 vLLM（OpenAI 兼容）发一条请求，用于单点连通性与输出检查。
 
-默认走 POST {base_url}/chat/completions；也可用 --completions 走 /v1/completions。
+默认走 POST {base_url}/chat/completions；也可用 --completions 走 {base_url}/completions。
 
 -p / --prompt 支持内置模板：写成 @预设名（如 -p @zh），自由文本不要加 @。
   预设列表见 --list-prompts。

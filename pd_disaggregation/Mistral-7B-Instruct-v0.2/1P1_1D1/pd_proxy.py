@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""1P2+1D1 负载均衡代理：1 个 P（9000，2 卡 TP=2）+ 1 个 D（9010），对外 8000。"""
+"""1P1+1D1 负载均衡代理：1 个 P（9000）+ 1 个 D（9010），对外 8000。"""
 from __future__ import annotations
 
 import os

@@ -1,7 +1,6 @@
 #!/bin/sh
-# Mistral-7B-Instruct-v0.2/1P2_1D1：单机 1 个 P（2 卡 TP=2）+ 1 个 D（1 卡 TP=1），共 3 卡。
-# 与 run_decode.sh 配套；connector 中 prefill tp_size=2，decode dp_size=1, tp_size=1。
-# NIC_NAME / LOCAL_IP 由 PdServiceCtl 注入；单独跑脚本时请 export，默认值与 pd_service_ctl 中常量一致。
+# Mistral-7B-Instruct-v0.2/1P1_1D1_dynamickv：单机 1 个 P（1 卡 TP=1）+ 1 个 D（1 卡 TP=1），共 2 卡。
+# 与 run_decode.sh 配套；在原 1P1_1D1 基础上开启 DynamicKV（--additional-config）。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
 model_path="/root/autodl-tmp/models/Mistral-7B-Instruct-v0.2"
@@ -12,10 +11,8 @@ dp_ip="127.0.0.1"
 dp_port=13395
 engine_port=9000
 
-# 1 个 Prefill 进程占用 2 张 NPU 卡（示例：0,1）
-visible_devices="${PREFILL_VISIBLE_DEVICES:-0,1}"
-
-# ==========================================
+# 1 个 Prefill 进程占用 1 张 NPU 卡（示例：0）
+visible_devices="${PREFILL_VISIBLE_DEVICES:-0}"
 
 export ASCEND_RT_VISIBLE_DEVICES=$visible_devices
 
@@ -52,13 +49,13 @@ if [ "$dp_size" -gt 1 ]; then
 else
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=0
 fi
-
 run_prefill() {
 vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
     --enable-prefix-caching \
-    --tensor-parallel-size 2 \
+    --no-enable-chunked-prefill \
+    --tensor-parallel-size 1 \
     --seed 1024 \
     --served-model-name mistral_7b_instruct_v0_2 \
     --dtype bfloat16 \
@@ -70,6 +67,17 @@ vllm serve "$model_path" \
     --tool-call-parser mistral \
     --gpu-memory-utilization 0.9 \
     --enforce-eager \
+    --additional-config \
+    '{
+        "dynamic_kv": {
+            "enabled": true,
+            "model_types": ["mistral"],
+            "window_size": 256,
+            "prompt_kv_len_budget": 20450,
+            "pooling": "none",
+            "kernel_size": 1
+        }
+    }' \
     --kv-transfer-config \
     '{
         "kv_connector": "MooncakeConnectorV1",
@@ -79,7 +87,7 @@ vllm serve "$model_path" \
         "kv_port": "20001",
         "engine_id": "0",
         "kv_connector_extra_config": {
-            "prefill": { "dp_size": 1, "tp_size": 2 },
+            "prefill": { "dp_size": 1, "tp_size": 1 },
             "decode": { "dp_size": 1, "tp_size": 1 }
         },
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector"

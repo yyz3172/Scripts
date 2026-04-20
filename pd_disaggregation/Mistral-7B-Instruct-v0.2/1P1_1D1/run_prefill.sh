@@ -1,20 +1,19 @@
 #!/bin/sh
-# Mistral-7B-Instruct-v0.2/1P2_1D1：单机 1 个 Decode（1 卡 TP=1）。与 run_prefill.sh 配套。
-# 日志：vllm 写入 ${LOG_DIR}/decode_0.log（LOG_DIR 默认 .）。
+# Mistral-7B-Instruct-v0.2/1P1_1D1：单机 1 个 P（1 卡 TP=1）+ 1 个 D（1 卡 TP=1），共 2 卡。
+# 与 run_decode.sh 配套；connector 中 prefill tp_size=1，decode dp_size=1, tp_size=1。
 # NIC_NAME / LOCAL_IP 由 PdServiceCtl 注入；单独跑脚本时请 export，默认值与 pd_service_ctl 中常量一致。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
 model_path="/root/autodl-tmp/models/Mistral-7B-Instruct-v0.2"
 transfer_engine_lib_path="/usr/local/lib"
 python_lib_path="/root/.local/share/uv/python/cpython-3.11.15-linux-aarch64-gnu/lib"
-
 dp_size=1
-dp_rank=0
 dp_ip="127.0.0.1"
-dp_rpc_port=13495
+dp_port=13395
+engine_port=9000
 
-engine_port=9010
-visible_devices="${DECODE_VISIBLE_DEVICES:-2}"
+# 1 个 Prefill 进程占用 1 张 NPU 卡（示例：0）
+visible_devices="${PREFILL_VISIBLE_DEVICES:-0}"
 
 # ==========================================
 
@@ -36,13 +35,13 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export HCCL_BUFFSIZE=1024
+export HCCL_BUFFSIZE=256
 
 export VLLM_DP_SIZE=$dp_size
 export VLLM_DP_MASTER_IP=$dp_ip
-export VLLM_DP_MASTER_PORT=$dp_rpc_port
+export VLLM_DP_MASTER_PORT=$dp_port
 export VLLM_DP_RANK_LOCAL=0
-export VLLM_DP_RANK=$dp_rank
+export VLLM_DP_RANK=0
 export VLLM_DP_SIZE_LOCAL=1
 
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -54,21 +53,19 @@ else
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=0
 fi
 
-LOG_DIR="${LOG_DIR:-.}"
-mkdir -p "$LOG_DIR"
-exec >> "${LOG_DIR}/decode.log" 2>&1
-
+run_prefill() {
 vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
+    --enable-prefix-caching \
     --tensor-parallel-size 1 \
-    --nnodes 1 \
     --seed 1024 \
     --served-model-name mistral_7b_instruct_v0_2 \
     --dtype bfloat16 \
     --max-model-len 32768 \
     --max-num-batched-tokens 32768 \
     --max-num-seqs 256 \
+    --long-prefill-token-threshold 1024 \
     --enable-auto-tool-choice \
     --tool-call-parser mistral \
     --gpu-memory-utilization 0.9 \
@@ -77,14 +74,19 @@ vllm serve "$model_path" \
     '{
         "kv_connector": "MooncakeConnectorV1",
         "kv_buffer_device": "npu",
-        "kv_role": "kv_consumer",
+        "kv_role": "kv_producer",
         "kv_parallel_size": "1",
-        "kv_port": "20002",
-        "engine_id": "1",
+        "kv_port": "20001",
+        "engine_id": "0",
         "kv_connector_extra_config": {
-            "prefill": { "dp_size": 1, "tp_size": 2 },
+            "prefill": { "dp_size": 1, "tp_size": 1 },
             "decode": { "dp_size": 1, "tp_size": 1 }
         },
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector"
     }'
+}
+
+LOG_DIR="${LOG_DIR:-.}"
+mkdir -p "$LOG_DIR"
+run_prefill >> "${LOG_DIR}/prefill.log" 2>&1
 

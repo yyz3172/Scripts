@@ -73,9 +73,10 @@ vllm serve "$model_path" \
             "enabled": true,
             "model_types": ["mistral"],
             "window_size": 256,
-            "prompt_kv_len_budget": 20450,
-            "pooling": "none",
-            "kernel_size": 1
+            "prompt_kv_len_budget": 10000,
+            "radio_max": 10.0,
+            "pooling": "avgpool",
+            "kernel_size": 7
         }
     }' \
     --kv-transfer-config \

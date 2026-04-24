@@ -442,6 +442,27 @@ class PdServiceCtl:
         self._log(f"ERROR: {name} 进程疑似已退出（pid={pid}）")
         return False
 
+    def _cleanup_stale_pid_files(self) -> None:
+        """清理 pid 文件存在但进程已退出的残留，避免误判运行中。"""
+        for pid_file, label in ((PID_PROXY, "proxy"), (PID_DECODE, "decode"), (PID_PREFILL, "prefill")):
+            pid = _read_pid_file(pid_file)
+            if pid is None:
+                continue
+            if not _pid_alive(pid):
+                pid_file.unlink(missing_ok=True)
+                self._log(f"[start] 清理残留 pid 文件: {pid_file}（{label} pid={pid} 已不存在）")
+
+    def _running_components(self) -> list[tuple[str, int, Path]]:
+        """返回仍在运行的组件列表：[(label, pid, pid_file), ...]"""
+        running: list[tuple[str, int, Path]] = []
+        for pid_file, label in ((PID_PROXY, "proxy"), (PID_DECODE, "decode"), (PID_PREFILL, "prefill")):
+            pid = _read_pid_file(pid_file)
+            if pid is None:
+                continue
+            if _pid_alive(pid):
+                running.append((label, pid, pid_file))
+        return running
+
     def start_prefill(self, log_dir: Path) -> None:
         log_dir = log_dir.resolve()
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -558,6 +579,14 @@ echo $! > "{PID_DECODE}"
         ``with_proxy`` 为 ``None`` 时：存在 ``pd_proxy.py`` 则起代理。
         返回 0 成功；失败时会尽量回收已起进程。
         """
+        # 防重入：未 stop 前再次 start 直接报错
+        self._cleanup_stale_pid_files()
+        running = self._running_components()
+        if running:
+            detail = ", ".join([f"{lbl}(pid={pid}, pid_file={pf})" for lbl, pid, pf in running])
+            self._log(f"ERROR: PD 服务已在运行，禁止重复 start；请先 stop。运行中: {detail}")
+            return 1
+
         log_dir = log_dir.resolve()
         log_dir.mkdir(parents=True, exist_ok=True)
         has_proxy = self.has_proxy_script

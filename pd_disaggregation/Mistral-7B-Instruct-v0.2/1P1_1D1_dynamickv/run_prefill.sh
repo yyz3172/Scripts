@@ -71,7 +71,9 @@ vllm serve "$model_path" \
     '{
         "dynamic_kv": {
             "enabled": true,
+            "impl": "attn",
             "model_types": ["mistral"],
+            "validation_mode": "mask",
             "window_size": 256,
             "prompt_kv_len_budget": 10000,
             "radio_max": 10.0,

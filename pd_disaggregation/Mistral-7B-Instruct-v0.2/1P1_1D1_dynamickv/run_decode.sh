@@ -74,12 +74,13 @@ vllm serve "$model_path" \
     '{
         "dynamic_kv": {
             "enabled": true,
-            "impl": "attn",
+            "impl": "offload",
             "model_types": ["mistral"],
-            "validation_mode": "mask",
+            "validation_mode": "none",
             "window_size": 256,
-            "prompt_kv_len_budget": 10000,
+            "prompt_kv_len_budget": 4096,
             "radio_max": 10.0,
+            "min_rewrite_delta": 1,
             "pooling": "avgpool",
             "kernel_size": 7
         }

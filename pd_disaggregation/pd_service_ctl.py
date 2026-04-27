@@ -572,7 +572,7 @@ echo $! > "{PID_DECODE}"
         *,
         with_proxy: Optional[bool] = None,
         ready_timeout_s: Optional[int] = None,
-        start_mode: str = "serial",
+        start_mode: str = "parallel",
     ) -> int:
         """
         顺序启动 prefill → decode →（可选）代理。
@@ -728,7 +728,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     p_start.add_argument(
         "--start_mode",
         choices=("serial", "parallel"),
-        default="serial",
+        default="parallel",
         help="组件拉起模式：serial=串行（prefill ready 后再起 decode）；parallel=并行（prefill/decode 都拉起后再统一等 ready）",
     )
 

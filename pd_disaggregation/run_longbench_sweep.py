@@ -211,7 +211,6 @@ def run_sweep(cfg: SweepConfig) -> int:
         stack_rc = pd_ctl.start_stack(
             round_log_dir,
             with_proxy=use_proxy_sweep,
-            wait_ready=True,
         )
         if stack_rc != 0:
             log_sweep(

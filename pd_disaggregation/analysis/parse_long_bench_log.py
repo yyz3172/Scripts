@@ -60,7 +60,10 @@ CHART_GROUPS = [
     ("TTFT(ms)", ["ttft_n", "ttft_avg", "ttft_max", "ttft_p99", "ttft_p95", "ttft_p90", "ttft_p50", "ttft_min"]),
     ("E2E(ms)", ["e2e_n", "e2e_avg", "e2e_max", "e2e_p99", "e2e_p95", "e2e_p90", "e2e_p50", "e2e_min"]),
     ("TPOT(ms)", ["tpot_n", "tpot_avg", "tpot_max", "tpot_p99", "tpot_p95", "tpot_p90", "tpot_p50", "tpot_min"]),
+    ("InputTokens(tok)", ["input_tokens_n", "input_tokens_avg", "input_tokens_max", "input_tokens_p99", "input_tokens_p95", "input_tokens_p90", "input_tokens_p50", "input_tokens_min"]),
     ("OutputTokens(tok)", ["output_tokens_n", "output_tokens_avg", "output_tokens_max", "output_tokens_p99", "output_tokens_p95", "output_tokens_p90", "output_tokens_p50", "output_tokens_min"]),
+    ("InputTokens_COT(tok)", ["input_tokens_cot_n", "input_tokens_cot_avg", "input_tokens_cot_max", "input_tokens_cot_p99", "input_tokens_cot_p95", "input_tokens_cot_p90", "input_tokens_cot_p50", "input_tokens_cot_min"]),
+    ("OutputTokens_COT(tok)", ["output_tokens_cot_n", "output_tokens_cot_avg", "output_tokens_cot_max", "output_tokens_cot_p99", "output_tokens_cot_p95", "output_tokens_cot_p90", "output_tokens_cot_p50", "output_tokens_cot_min"]),
     ("TTFT_COT(ms)", ["ttft_cot_n", "ttft_cot_avg", "ttft_cot_max", "ttft_cot_p99", "ttft_cot_p95", "ttft_cot_p90", "ttft_cot_p50", "ttft_cot_min"]),
     ("E2E_COT(ms)", ["e2e_cot_n", "e2e_cot_avg", "e2e_cot_max", "e2e_cot_p99", "e2e_cot_p95", "e2e_cot_p90", "e2e_cot_p50", "e2e_cot_min"]),
 ]
@@ -180,16 +183,22 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
     ttft_ms: List[Any] = []
     e2e_ms: List[Any] = []
     tpot_ms: List[Any] = []
+    input_tokens: List[Any] = []
     output_tokens: List[Any] = []
     ttft_ms_cot: List[Any] = []
     e2e_ms_cot: List[Any] = []
+    input_tokens_cot: List[Any] = []
+    output_tokens_cot: List[Any] = []
 
     pred_none = 0
     # TTFT/E2E/TPOT/OutputTokens 按 domain/sub_domain 分组
     group_ttft: Dict[tuple[str, str], List[Any]] = {}
     group_e2e: Dict[tuple[str, str], List[Any]] = {}
     group_tpot: Dict[tuple[str, str], List[Any]] = {}
+    group_input_tokens: Dict[tuple[str, str], List[Any]] = {}
     group_output_tokens: Dict[tuple[str, str], List[Any]] = {}
+    group_input_tokens_cot: Dict[tuple[str, str], List[Any]] = {}
+    group_output_tokens_cot: Dict[tuple[str, str], List[Any]] = {}
 
     for pred in pred_data:
         acc = float(bool(pred.get("judge")))
@@ -220,12 +229,18 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
             e2e_ms.append(pred.get("e2e_ms"))
         if "tpot_ms" in pred:
             tpot_ms.append(pred.get("tpot_ms"))
+        if "input_tokens" in pred:
+            input_tokens.append(pred.get("input_tokens"))
         if "output_tokens" in pred:
             output_tokens.append(pred.get("output_tokens"))
         if "ttft_ms_cot" in pred:
             ttft_ms_cot.append(pred.get("ttft_ms_cot"))
         if "e2e_ms_cot" in pred:
             e2e_ms_cot.append(pred.get("e2e_ms_cot"))
+        if "input_tokens_cot" in pred:
+            input_tokens_cot.append(pred.get("input_tokens_cot"))
+        if "output_tokens_cot" in pred:
+            output_tokens_cot.append(pred.get("output_tokens_cot"))
 
         dom = str(pred.get("domain") or "")
         sub = str(pred.get("sub_domain") or "")
@@ -242,10 +257,22 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
             group_tpot.setdefault(gk, []).append(pred.get("tpot_ms"))
             group_tpot.setdefault((dom, "all"), []).append(pred.get("tpot_ms"))
             group_tpot.setdefault(("all", "all"), []).append(pred.get("tpot_ms"))
+        if "input_tokens" in pred:
+            group_input_tokens.setdefault(gk, []).append(pred.get("input_tokens"))
+            group_input_tokens.setdefault((dom, "all"), []).append(pred.get("input_tokens"))
+            group_input_tokens.setdefault(("all", "all"), []).append(pred.get("input_tokens"))
         if "output_tokens" in pred:
             group_output_tokens.setdefault(gk, []).append(pred.get("output_tokens"))
             group_output_tokens.setdefault((dom, "all"), []).append(pred.get("output_tokens"))
             group_output_tokens.setdefault(("all", "all"), []).append(pred.get("output_tokens"))
+        if "input_tokens_cot" in pred:
+            group_input_tokens_cot.setdefault(gk, []).append(pred.get("input_tokens_cot"))
+            group_input_tokens_cot.setdefault((dom, "all"), []).append(pred.get("input_tokens_cot"))
+            group_input_tokens_cot.setdefault(("all", "all"), []).append(pred.get("input_tokens_cot"))
+        if "output_tokens_cot" in pred:
+            group_output_tokens_cot.setdefault(gk, []).append(pred.get("output_tokens_cot"))
+            group_output_tokens_cot.setdefault((dom, "all"), []).append(pred.get("output_tokens_cot"))
+            group_output_tokens_cot.setdefault(("all", "all"), []).append(pred.get("output_tokens_cot"))
 
     overall = _pct(easy_acc + hard_acc, n)
     acc = {
@@ -260,9 +287,12 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
         "ttft": _summarize_latency(ttft_ms),
         "e2e": _summarize_latency(e2e_ms),
         "tpot": _summarize_latency(tpot_ms),
+        "input_tokens": _summarize_latency(input_tokens),
         "output_tokens": _summarize_latency(output_tokens),
         "ttft_cot": _summarize_latency(ttft_ms_cot),
         "e2e_cot": _summarize_latency(e2e_ms_cot),
+        "input_tokens_cot": _summarize_latency(input_tokens_cot),
+        "output_tokens_cot": _summarize_latency(output_tokens_cot),
     }
 
     latency_by_domain_sub: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -270,7 +300,10 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
         set(group_ttft.keys())
         | set(group_e2e.keys())
         | set(group_tpot.keys())
+        | set(group_input_tokens.keys())
         | set(group_output_tokens.keys())
+        | set(group_input_tokens_cot.keys())
+        | set(group_output_tokens_cot.keys())
     )
 
     def _gk_sort(x: tuple[str, str]) -> tuple[int, str, int, str]:
@@ -284,7 +317,10 @@ def summarize_one(jsonl_path: str, batch_name: str) -> BatchStats:
             "TTFT": _summarize_latency(group_ttft.get((dom, sub), [])),
             "E2E": _summarize_latency(group_e2e.get((dom, sub), [])),
             "TPOT": _summarize_latency(group_tpot.get((dom, sub), [])),
+            "InputTokens": _summarize_latency(group_input_tokens.get((dom, sub), [])),
             "OutputTokens": _summarize_latency(group_output_tokens.get((dom, sub), [])),
+            "InputTokens_COT": _summarize_latency(group_input_tokens_cot.get((dom, sub), [])),
+            "OutputTokens_COT": _summarize_latency(group_output_tokens_cot.get((dom, sub), [])),
         }
 
     return BatchStats(
@@ -331,9 +367,12 @@ def _flatten_stats(s: BatchStats) -> Dict[str, Any]:
     _put("ttft", s.latency_ms.get("ttft", {}))
     _put("e2e", s.latency_ms.get("e2e", {}))
     _put("tpot", s.latency_ms.get("tpot", {}))
+    _put("input_tokens", s.latency_ms.get("input_tokens", {}))
     _put("output_tokens", s.latency_ms.get("output_tokens", {}))
     _put("ttft_cot", s.latency_ms.get("ttft_cot", {}))
     _put("e2e_cot", s.latency_ms.get("e2e_cot", {}))
+    _put("input_tokens_cot", s.latency_ms.get("input_tokens_cot", {}))
+    _put("output_tokens_cot", s.latency_ms.get("output_tokens_cot", {}))
     return out
 
 
@@ -342,7 +381,7 @@ def _metric_unit(key: str) -> str:
         return "%"
     if key in ("n", "pred_none"):
         return ""
-    if key.startswith("output_tokens_"):
+    if key.startswith(("input_tokens_", "output_tokens_", "input_tokens_cot_", "output_tokens_cot_")):
         return "tok"
     if key.endswith(("_avg", "_min", "_max", "_p50", "_p90", "_p95", "_p99")):
         # latency in ms
@@ -397,8 +436,14 @@ def _split_metric_key(key: str) -> tuple[str, str]:
             return f"{prefix.upper()}_COT(ms)", sub2
         if prefix in ("ttft", "e2e", "tpot"):
             return f"{prefix.upper()}(ms)", sub
+        if key.startswith("input_tokens_"):
+            return "INPUT_TOKENS(tok)", key[len("input_tokens_") :]
         if key.startswith("output_tokens_"):
             return "OUTPUT_TOKENS(tok)", key[len("output_tokens_") :]
+        if key.startswith("input_tokens_cot_"):
+            return "INPUT_TOKENS_COT(tok)", key[len("input_tokens_cot_") :]
+        if key.startswith("output_tokens_cot_"):
+            return "OUTPUT_TOKENS_COT(tok)", key[len("output_tokens_cot_") :]
     # fallback
     return key, ""
 
@@ -422,11 +467,17 @@ def write_excel(rows: List[Dict[str, Any]], stats: List[BatchStats], out_path: s
 
     hide_ttft_cot = ("ttft_cot_n" in all_keys_set) and _all_zero("ttft_cot_n")
     hide_e2e_cot = ("e2e_cot_n" in all_keys_set) and _all_zero("e2e_cot_n")
+    hide_input_tokens_cot = ("input_tokens_cot_n" in all_keys_set) and _all_zero("input_tokens_cot_n")
+    hide_output_tokens_cot = ("output_tokens_cot_n" in all_keys_set) and _all_zero("output_tokens_cot_n")
 
     if hide_ttft_cot:
         all_keys_set = {k for k in all_keys_set if not k.startswith("ttft_cot_")}
     if hide_e2e_cot:
         all_keys_set = {k for k in all_keys_set if not k.startswith("e2e_cot_")}
+    if hide_input_tokens_cot:
+        all_keys_set = {k for k in all_keys_set if not k.startswith("input_tokens_cot_")}
+    if hide_output_tokens_cot:
+        all_keys_set = {k for k in all_keys_set if not k.startswith("output_tokens_cot_")}
 
     # Accuracy 页指标顺序：先放 acc_*（便于直接用主表画折线图且横坐标对齐），再放 n/pred_none
     summary_order = ["acc_overall", "acc_easy", "acc_hard", "acc_short", "acc_medium", "acc_long", "n", "pred_none"]
@@ -524,8 +575,16 @@ def write_excel(rows: List[Dict[str, Any]], stats: List[BatchStats], out_path: s
         return a, b
 
     stat_order = ["n", "avg", "max", "p99", "p95", "p90", "p50", "min"]
-    metrics = ["TTFT", "E2E", "TPOT", "OutputTokens"]
-    metric_unit = {"TTFT": "ms", "E2E": "ms", "TPOT": "ms", "OutputTokens": "tok"}
+    metrics = ["TTFT", "E2E", "TPOT", "InputTokens", "OutputTokens", "InputTokens_COT", "OutputTokens_COT"]
+    metric_unit = {
+        "TTFT": "ms",
+        "E2E": "ms",
+        "TPOT": "ms",
+        "InputTokens": "tok",
+        "OutputTokens": "tok",
+        "InputTokens_COT": "tok",
+        "OutputTokens_COT": "tok",
+    }
     rowi = 2
     def _sort_key(gk: str) -> tuple[int, str, int, str]:
         dom, sub = _split_gk(gk)

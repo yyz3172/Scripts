@@ -75,7 +75,7 @@ vllm serve "$model_path" \
             "model_types": ["mistral"],
             "validation_mode": "none",
             "window_size": 256,
-            "prompt_kv_len_budget": 4096,
+            "prompt_kv_len_budget": 2048,
             "radio_max": 10.0,
             "min_rewrite_delta": 1,
             "pooling": "avgpool",

@@ -6,7 +6,10 @@ PD 分离模式 LongBench 批量压测编排。
 
 说明：
 - PD 栈启停由同目录 `pd_service_ctl.PdServiceCtl` 完成。
-- LongBench 脚本为 `code/LongBench/pred.py`，通过环境变量 `VLLM_PORT`/`OPENAI_BASE_URL` 指向 vLLM(OpenAI兼容)服务。
+- 支持两类 LongBench：
+  - v2: `code/LongBench/pred.py`（本地 data.json / OpenAI 兼容接口）
+  - v1: `code/LongBench/LongBench/pred_http.py`（HF LongBench 数据集 / OpenAI 兼容接口，可选本地 per-dataset 文件夹）
+  均通过环境变量 `VLLM_PORT`/`OPENAI_BASE_URL` 指向 vLLM(OpenAI兼容)服务。
 - 本脚本默认“扫 n_proc”（并发进程数），用法上仍沿用 `run_sharegpt_sweep.py` 的 batch sweep 形态。
 """
 
@@ -33,6 +36,8 @@ LOG_ROOT = PKG_DIR / "logs"
 LOG_DIR_DEFAULT = LOG_ROOT / "longbench"
 LONGBENCH_DIR_DEFAULT = REPO_ROOT / "LongBench"
 PRED_PY_DEFAULT = LONGBENCH_DIR_DEFAULT / "pred.py"
+LONGBENCH_V1_DIR_DEFAULT = LONGBENCH_DIR_DEFAULT / "LongBench"
+PRED_HTTP_PY_DEFAULT = LONGBENCH_V1_DIR_DEFAULT / "pred_http.py"
 
 
 def pd_mode_to_model_name(pd_mode: str) -> str:
@@ -63,10 +68,13 @@ class SweepConfig:
     local_ip: str = pdctl.LOCAL_IP
     vllm_venv: Path = VLLM_VENV
     longbench_dir: Path = LONGBENCH_DIR_DEFAULT
-    pred_py: Path = PRED_PY_DEFAULT
+    bench: str = "v2"  # v2 -> code/LongBench/pred.py; v1 -> code/LongBench/LongBench/pred_http.py
+    longbench_e: bool = False
     round_cooldown_s: int = 5
 
-    # LongBench pred.py 关键参数
+    # 数据路径
+    # - v2: 必填，LongBench-v2 data.json/.jsonl 或目录
+    # - v1: 可选，本地 per-dataset 文件夹（缺失则回退 HF 在线 load_dataset）
     data_path: str = ""
     rag: int = 0
     cot: bool = False
@@ -127,51 +135,84 @@ def run_longbench_pred(
     round_dir = cfg.log_dir / f"batch_{batch_size}"
     round_dir.mkdir(parents=True, exist_ok=True)
 
-    if not cfg.pred_py.is_file():
-        log_sweep(sweep_log, f"ERROR: pred.py 不存在: {cfg.pred_py}")
-        return 1
-
     save_dir = round_dir
     save_dir.mkdir(parents=True, exist_ok=True)
     pred_log = round_dir / "pred.log"
 
     model = pd_mode_to_model_name(cfg.pd_mode)
-    args = [
-        sys.executable,
-        str(cfg.pred_py),
-        "--data_path",
-        cfg.data_path,
-        "--save_dir",
-        str(save_dir),
-        "--out_file",
-        "long_bench_output.jsonl",
-        "--model",
-        model,
-        "--n_proc",
-        str(batch_size),
-        "--rag",
-        str(cfg.rag),
-    ]
-    if cfg.cot:
-        args.append("--cot")
-    if cfg.no_context:
-        args.append("--no_context")
-    if cfg.measure_latency:
-        args.append("--measure_latency")
+    if cfg.bench == "v2":
+        pred_py = cfg.longbench_dir / "pred.py"
+        if not pred_py.is_file():
+            log_sweep(sweep_log, f"ERROR: pred.py 不存在: {pred_py}")
+            return 1
+        if not cfg.data_path:
+            log_sweep(sweep_log, "ERROR: v2 模式下 --data_path 必填")
+            return 1
+        args = [
+            sys.executable,
+            str(pred_py),
+            "--data_path",
+            cfg.data_path,
+            "--save_dir",
+            str(save_dir),
+            "--out_file",
+            "long_bench_output.jsonl",
+            "--model",
+            model,
+            "--n_proc",
+            str(batch_size),
+            "--rag",
+            str(cfg.rag),
+        ]
+        if cfg.cot:
+            args.append("--cot")
+        if cfg.no_context:
+            args.append("--no_context")
+        if cfg.measure_latency:
+            args.append("--measure_latency")
+        work_dir = cfg.longbench_dir
+        bench_desc = "LongBench-v2 pred.py"
+    elif cfg.bench == "v1":
+        pred_http_py = cfg.longbench_dir / "LongBench" / "pred_http.py"
+        if not pred_http_py.is_file():
+            log_sweep(sweep_log, f"ERROR: pred_http.py 不存在: {pred_http_py}")
+            return 1
+        args = [
+            sys.executable,
+            str(pred_http_py),
+            "--model",
+            model,
+            "--n_proc",
+            str(batch_size),
+            "--save_dir",
+            str(save_dir),
+        ]
+        if cfg.longbench_e:
+            args.append("--e")
+        if cfg.data_path:
+            # v1: 本地 per-dataset 目录（可选）
+            args += ["--data_path", cfg.data_path]
+        if not cfg.measure_latency:
+            args.append("--no-measure_latency")
+        work_dir = pred_http_py.parent
+        bench_desc = "LongBench-v1 pred_http.py"
+    else:
+        log_sweep(sweep_log, f"ERROR: 不支持的 --bench: {cfg.bench!r}")
+        return 1
 
     env = os.environ.copy()
     env["VLLM_PORT"] = str(bench_port)
 
     inner = f"""
 set -euo pipefail
-cd "{cfg.longbench_dir}"
+cd "{work_dir}"
 {" ".join([subprocess.list2cmdline([a]) if " " in a else a for a in args])} >> "{pred_log}" 2>&1
 """
     log_sweep(
         sweep_log,
-        f"Running LongBench pred.py (BATCH_SIZE={batch_size}, port={bench_port}, model={model})...",
+        f"Running {bench_desc} (BATCH_SIZE={batch_size}, port={bench_port}, model={model})...",
     )
-    r = subprocess.run(["/bin/bash", "-c", inner], cwd=str(cfg.longbench_dir), env=env)
+    r = subprocess.run(["/bin/bash", "-c", inner], cwd=str(work_dir), env=env)
     return r.returncode
 
 
@@ -275,16 +316,34 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         help="逗号分隔的 batch 列表（映射到 pred.py 的 --n_proc 并发进程数），如 \"8,16,32\"；默认 \"16\"",
     )
     p.add_argument(
+        "--bench",
+        choices=["v1", "v2"],
+        default="v2",
+        help="选择 LongBench 脚本版本：v2=code/LongBench/pred.py；v1=code/LongBench/LongBench/pred_http.py（HTTP版）。默认 v2。",
+    )
+    p.add_argument(
+        "--e",
+        action="store_true",
+        help="仅对 v1 生效：跑 LongBench-E（等价 pred_http.py 的 --e）。",
+    )
+    p.add_argument(
         "--data_path",
         type=str,
-        required=True,
-        help="LongBench-v2 数据路径：data.json/.jsonl 文件或包含 data.json 的目录（同 pred.py 约定）",
+        required=False,
+        default="",
+        help="数据路径：v2 必填（data.json/.jsonl 或目录）；v1 可选（本地 per-dataset 目录，不传则回退 HF 在线）。",
     )
     p.add_argument("--rag", type=int, default=0, help="传给 pred.py 的 --rag")
     p.add_argument("--cot", action="store_true", help="传给 pred.py 的 --cot")
     p.add_argument("--no_context", action="store_true", help="传给 pred.py 的 --no_context")
+    p.add_argument(
+        "--measure_latency",
+        dest="measure_latency",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否统计 TTFT/E2E（v2: 传 --measure_latency；v1: 传 --no-measure_latency 关闭）。默认开启。",
+    )
     p.add_argument("--longbench_dir", type=Path, default=LONGBENCH_DIR_DEFAULT)
-    p.add_argument("--pred_py", type=Path, default=PRED_PY_DEFAULT)
     args = p.parse_args(list(argv) if argv is not None else None)
 
     vllm_venv = args.vllm_venv.resolve() if args.vllm_venv is not None else VLLM_VENV
@@ -292,6 +351,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     local_ip = args.local_ip if args.local_ip is not None else pdctl.LOCAL_IP
     pd_mode = args.pd_mode if args.pd_mode is not None else pdctl.PD_MODE
     batch_sizes_s = args.batch_sizes if args.batch_sizes is not None else "16"
+
+    if args.bench == "v2" and not args.data_path:
+        raise SystemExit("--bench v2 需要提供 --data_path（LongBench-v2 data.json/.jsonl 或目录）")
 
     cfg = SweepConfig(
         log_dir=args.log_dir.resolve(),
@@ -301,11 +363,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         local_ip=local_ip,
         vllm_venv=vllm_venv,
         longbench_dir=args.longbench_dir.resolve(),
-        pred_py=args.pred_py.resolve(),
+        bench=args.bench,
+        longbench_e=args.e,
         data_path=args.data_path,
         rag=args.rag,
         cot=args.cot,
         no_context=args.no_context,
+        measure_latency=args.measure_latency,
     )
     return run_sweep(cfg)
 

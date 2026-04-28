@@ -54,18 +54,17 @@ vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
     --enable-prefix-caching \
-    --no-enable-chunked-prefill \
     --tensor-parallel-size 1 \
     --seed 1024 \
     --served-model-name mistral_7b_instruct_v0_2 \
     --dtype bfloat16 \
     --max-model-len 32768 \
-    --max-num-batched-tokens 32768 \
+    --max-num-batched-tokens 2048 \
     --max-num-seqs 256 \
     --long-prefill-token-threshold 1024 \
     --enable-auto-tool-choice \
     --tool-call-parser mistral \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.65 \
     --enforce-eager \
     --additional-config \
     '{

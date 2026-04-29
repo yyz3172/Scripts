@@ -64,7 +64,7 @@ vllm serve "$model_path" \
     --long-prefill-token-threshold 1024 \
     --enable-auto-tool-choice \
     --tool-call-parser mistral \
-    --gpu-memory-utilization 0.65 \
+    --gpu-memory-utilization 0.8 \
     --enforce-eager \
     --additional-config \
     '{

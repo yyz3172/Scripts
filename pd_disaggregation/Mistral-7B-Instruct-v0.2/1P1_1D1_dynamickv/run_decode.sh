@@ -63,12 +63,11 @@ vllm serve "$model_path" \
     --served-model-name mistral_7b_instruct_v0_2 \
     --dtype bfloat16 \
     --max-model-len 32768 \
-    --max-num-batched-tokens 32768 \
+    --max-num-batched-tokens 2048 \
     --max-num-seqs 256 \
-    --no-enable-chunked-prefill \
     --enable-auto-tool-choice \
     --tool-call-parser mistral \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.8 \
     --enforce-eager \
     --additional-config \
     '{

@@ -150,7 +150,17 @@ def _post_json(url: str, payload: dict, api_key: str, timeout: float) -> dict:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
+        raw = resp.read()
+        text = raw.decode("utf-8", errors="replace")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            content_type = resp.headers.get("Content-Type", "")
+            preview = text[:1000] if text else "<empty response body>"
+            raise ValueError(
+                f"响应不是有效 JSON: HTTP {resp.status} {url}; "
+                f"Content-Type={content_type!r}; body preview:\n{preview}"
+            ) from e
 
 
 def main() -> int:
@@ -233,6 +243,9 @@ def main() -> int:
         return 1
     except urllib.error.URLError as e:
         print(f"请求失败: {e.reason}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
         return 1
 
     print(json.dumps(body, ensure_ascii=False, indent=2))

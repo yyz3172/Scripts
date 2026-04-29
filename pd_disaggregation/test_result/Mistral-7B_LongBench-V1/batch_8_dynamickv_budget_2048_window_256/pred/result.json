@@ -1,0 +1,14 @@
+{
+    "narrativeqa": 18.02,
+    "qasper": 25.1,
+    "multifieldqa_en": 41.44,
+    "multifieldqa_zh": 38.28,
+    "hotpotqa": 35.07,
+    "2wikimqa": 18.82,
+    "musique": 15.88,
+    "dureader": 15.62,
+    "gov_report": 24.53,
+    "qmsum": 21.45,
+    "multi_news": 26.41,
+    "vcsum": 8.8
+}

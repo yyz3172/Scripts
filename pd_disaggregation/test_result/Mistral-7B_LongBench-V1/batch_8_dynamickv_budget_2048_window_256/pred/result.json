@@ -10,5 +10,14 @@
     "gov_report": 24.53,
     "qmsum": 21.45,
     "multi_news": 26.41,
-    "vcsum": 8.8
+    "vcsum": 8.8,
+    "lcc": 38.52,
+    "lsht": 13.65,
+    "passage_count": 4.36,
+    "passage_retrieval_en": 71.71,
+    "passage_retrieval_zh": 74.63,
+    "repobench-p": 42.47,
+    "samsum": 34.32,
+    "trec": 39.5,
+    "triviaqa": 74.7
 }

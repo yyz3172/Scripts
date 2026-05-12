@@ -8,6 +8,13 @@
 
 环境变量（可被命令行覆盖）：
   OPENAI_API_KEY    默认 EMPTY（无鉴权时 vLLM 常用占位）
+
+默认使用流式请求（stream=true）在客户端统计：
+  TTFT_ms  首 Token 延迟（Time To First Token；口语/笔误里偶见「FFTF」）
+  E2E_ms   从发起请求到收完流的端到端时间
+  TPOT_ms  平均每输出 Token 耗时（毫秒/Token），用 (E2E_ms - TTFT_ms) / completion_tokens
+           与 LongBench/pred_http.py 口径一致；completion_tokens 来自流末 usage（需 stream_options.include_usage）。
+  加 --no-stream 则走单次非流式 JSON，仅打印 E2E_ms，TTFT/TPOT 为 null。
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -163,6 +171,141 @@ def _post_json(url: str, payload: dict, api_key: str, timeout: float) -> dict:
             ) from e
 
 
+def _post_json_stream_aggregate(
+    url: str,
+    payload: dict,
+    api_key: str,
+    timeout: float,
+    *,
+    completions: bool,
+) -> tuple[dict, dict[str, float | None]]:
+    """流式 POST，解析 SSE，聚合成与非流式相近的 body，并返回客户端时延（毫秒）。
+
+    指标为客户端视角（含网络与排队），与 LongBench/pred_http.py 一致。
+    """
+    stream_payload = {
+        **payload,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    data = json.dumps(stream_payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    t0 = time.perf_counter()
+    first_content_t: float | None = None
+    text_parts: list[str] = []
+    finish_reason: str | None = None
+    resp_id: str | None = None
+    model_name: str | None = None
+    usage: dict | None = None
+
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        while True:
+            raw = resp.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload_text = line[5:].lstrip()
+            if payload_text == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if resp_id is None and isinstance(obj.get("id"), str):
+                resp_id = obj["id"]
+            if model_name is None and isinstance(obj.get("model"), str):
+                model_name = obj["model"]
+            now = time.perf_counter()
+            for choice in obj.get("choices") or []:
+                if completions:
+                    piece = choice.get("text")
+                    if piece:
+                        if first_content_t is None:
+                            first_content_t = now
+                        text_parts.append(piece)
+                else:
+                    delta = choice.get("delta") or {}
+                    piece = delta.get("content")
+                    if piece:
+                        if first_content_t is None:
+                            first_content_t = now
+                        text_parts.append(piece)
+                fr = choice.get("finish_reason")
+                if fr:
+                    finish_reason = fr
+            u = obj.get("usage")
+            if isinstance(u, dict):
+                usage = u
+
+    t_end = time.perf_counter()
+    full_text = "".join(text_parts)
+    e2e_ms = (t_end - t0) * 1000.0
+    ttft_ms = (first_content_t - t0) * 1000.0 if first_content_t is not None else None
+
+    completion_tokens: int | None = None
+    if usage:
+        ct = usage.get("completion_tokens")
+        if isinstance(ct, int) and ct >= 0:
+            completion_tokens = ct
+
+    tpot_ms: float | None = None
+    if (
+        ttft_ms is not None
+        and completion_tokens is not None
+        and completion_tokens > 0
+        and e2e_ms >= ttft_ms
+    ):
+        tpot_ms = (e2e_ms - ttft_ms) / float(completion_tokens)
+
+    if completions:
+        agg: dict = {
+            "id": resp_id or "",
+            "object": "text_completion",
+            "model": model_name or payload.get("model", ""),
+            "choices": [
+                {
+                    "text": full_text,
+                    "index": 0,
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+    else:
+        agg = {
+            "id": resp_id or "",
+            "object": "chat.completion",
+            "model": model_name or payload.get("model", ""),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": full_text},
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+    if usage:
+        agg["usage"] = usage
+
+    metrics = {
+        "ttft_ms": ttft_ms,
+        "e2e_ms": e2e_ms,
+        "tpot_ms": tpot_ms,
+    }
+    return agg, metrics
+
+
 def main() -> int:
     preset_help = "用户消息；写 @预设名 使用内置模板（如 @short、@code），预设见 --list-prompts"
     p = argparse.ArgumentParser(
@@ -198,6 +341,11 @@ def main() -> int:
         help="使用 /v1/completions 而非 chat（适合无 chat 模板的纯文本模型）",
     )
     p.add_argument("--raw", action="store_true", help="只打印完整 JSON，不额外打印 assistant 摘要")
+    p.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="非流式单次请求：仅能量化 E2E_ms，TTFT_ms/TPOT_ms 为 null（与旧行为一致）",
+    )
     args = p.parse_args()
 
     if args.list_prompts:
@@ -235,8 +383,24 @@ def main() -> int:
             "temperature": args.temperature,
         }
 
+    latency: dict[str, float | None] = {}
     try:
-        body = _post_json(url, payload, args.api_key, args.timeout)
+        if args.no_stream:
+            t_req = time.perf_counter()
+            body = _post_json(url, payload, args.api_key, args.timeout)
+            latency = {
+                "ttft_ms": None,
+                "e2e_ms": (time.perf_counter() - t_req) * 1000.0,
+                "tpot_ms": None,
+            }
+        else:
+            body, latency = _post_json_stream_aggregate(
+                url,
+                payload,
+                args.api_key,
+                args.timeout,
+                completions=args.completions,
+            )
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", errors="replace")
         print(f"HTTP {e.code} {url}\n{err}", file=sys.stderr)
@@ -249,6 +413,17 @@ def main() -> int:
         return 1
 
     print(json.dumps(body, ensure_ascii=False, indent=2))
+    latency_lines = (
+        "\n--- latency (client) ---",
+        f"TTFT_ms: {latency.get('ttft_ms')!r}",
+        f"TPOT_ms: {latency.get('tpot_ms')!r}",
+        f"E2E_ms:  {latency.get('e2e_ms')!r}",
+        "（TTFT=首 Token；TPOT=(E2E-TTFT)/completion_tokens；无 usage 时 TPOT 可能为 null）",
+    )
+    if args.raw:
+        print(*latency_lines, sep="\n", file=sys.stderr)
+    else:
+        print(*latency_lines, sep="\n")
     if args.raw:
         return 0
 

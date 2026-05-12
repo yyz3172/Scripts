@@ -3,8 +3,8 @@
 
 默认走 POST {base_url}/chat/completions；也可用 --completions 走 {base_url}/completions。
 
--p / --prompt 支持内置模板：写成 @预设名（如 -p @short），自由文本不要加 @。
-  预设列表见 --list-prompts。
+-p / --prompt 支持内置模板：写成 @预设名（如 -p @short、@longbench_dureader_10k），自由文本不要加 @。
+  预设列表见 --list-prompts。LongBench dureader 真样本见同目录 longbench_dureader_sample_*.json；长解码压测请加大 --max-tokens（如 768）。
 
 环境变量（可被命令行覆盖）：
   OPENAI_API_KEY    默认 EMPTY（无鉴权时 vLLM 常用占位）
@@ -27,6 +27,8 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from functools import lru_cache
+from pathlib import Path
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
 
@@ -35,6 +37,45 @@ PresetValue = str | Callable[[], str]
 # 长上下文预设 @long20k：主体目标字数（多句拼接，减少「重复句」被分词极度压缩的情况）
 # 20k tokens 为粗估
 LONG20k_BODY_TARGET_CHARS = 22_000
+
+_LONG20K_PHRASES: tuple[str, ...] = (
+    "大模型推理分为预填充与解码两阶段；预填充对整段提示做单次前向并写入KV缓存。",
+    "PagedAttention 将KV分页存放以降低显存碎片并提高批内并行度。",
+    "连续批处理允许新请求插入正在运行的批次，用调度换整体吞吐。",
+    "投机解码用小草稿模型或大步长草稿降低解码步数，需与接受率权衡。",
+    "张量并行按列或行切分权重，多卡间通信成为扩展瓶颈之一。",
+    "流水线并行把层分到不同设备，气泡时间与微批大小影响效率。",
+    "数据并行复制模型分片数据，梯度聚合方式影响带宽与延迟。",
+    "量化与稀疏化可减少权重量化比特与激活占用，但需校准精度。",
+    "FlashAttention 通过分块与重算降低注意力显存访问量级。",
+    "RoPE 与 ALiBi 等位置编码影响外推长度与长文稳定性。",
+    "KV 传输在 PD 分离架构中占用网络带宽，序列化与压缩可优化。",
+    "前缀缓存可复用相同系统提示或文档头的KV，降低首包延迟。",
+    "调度器在 waiting 与 running 队列间分配，防止长请求饿死短请求。",
+    "显存池与块分配策略影响是否能在高并发下仍接受新请求。",
+    "温度与 top_p 等采样参数不改变预填充算量，主要影响解码路径。",
+    "工具调用与 JSON 约束常在解码端加状态机或 logits 处理。",
+    "多模态流水线在视觉编码后与文本嵌入拼接，再进入语言解码。",
+    "推理服务常暴露 OpenAI 兼容 HTTP 接口以便压测与集成。",
+    "健康检查与就绪探针用于编排系统滚动升级与流量切换。",
+    "指标采集包括 TTFT、TPOT、吞吐与 GPU 利用率，用于调参对比。",
+    "长提示的 tokenizer 开销与模型最大上下文长度共同限制可用输入。",
+    "vLLM 等框架将引擎事件与周期指标写入日志，便于离线分析。",
+)
+
+
+def _long20k_rotating_body() -> str:
+    """与 @long20k_* 相同的长正文：约 LONG20k_BODY_TARGET_CHARS 字，轮换短句拼接。"""
+    parts: list[str] = []
+    total = 0
+    i = 0
+    phrases = _LONG20K_PHRASES
+    while total < LONG20k_BODY_TARGET_CHARS:
+        s = phrases[i % len(phrases)]
+        parts.append(s)
+        total += len(s)
+        i += 1
+    return "".join(parts)[:LONG20k_BODY_TARGET_CHARS]
 
 
 def _build_preset_long20k(*, tail_header: bool = False) -> str:
@@ -45,39 +86,7 @@ def _build_preset_long20k(*, tail_header: bool = False) -> str:
         "以上为长上下文压测文本：由多段互不相同的说明轮换拼接。请通读全文后，仅用「是」或「否」回答文末问题。\n\n"
     )
     preamble = preamble_last if tail_header else preamble_first
-    phrases = (
-        "大模型推理分为预填充与解码两阶段；预填充对整段提示做单次前向并写入KV缓存。",
-        "PagedAttention 将KV分页存放以降低显存碎片并提高批内并行度。",
-        "连续批处理允许新请求插入正在运行的批次，用调度换整体吞吐。",
-        "投机解码用小草稿模型或大步长草稿降低解码步数，需与接受率权衡。",
-        "张量并行按列或行切分权重，多卡间通信成为扩展瓶颈之一。",
-        "流水线并行把层分到不同设备，气泡时间与微批大小影响效率。",
-        "数据并行复制模型分片数据，梯度聚合方式影响带宽与延迟。",
-        "量化与稀疏化可减少权重量化比特与激活占用，但需校准精度。",
-        "FlashAttention 通过分块与重算降低注意力显存访问量级。",
-        "RoPE 与 ALiBi 等位置编码影响外推长度与长文稳定性。",
-        "KV 传输在 PD 分离架构中占用网络带宽，序列化与压缩可优化。",
-        "前缀缓存可复用相同系统提示或文档头的KV，降低首包延迟。",
-        "调度器在 waiting 与 running 队列间分配，防止长请求饿死短请求。",
-        "显存池与块分配策略影响是否能在高并发下仍接受新请求。",
-        "温度与 top_p 等采样参数不改变预填充算量，主要影响解码路径。",
-        "工具调用与 JSON 约束常在解码端加状态机或 logits 处理。",
-        "多模态流水线在视觉编码后与文本嵌入拼接，再进入语言解码。",
-        "推理服务常暴露 OpenAI 兼容 HTTP 接口以便压测与集成。",
-        "健康检查与就绪探针用于编排系统滚动升级与流量切换。",
-        "指标采集包括 TTFT、TPOT、吞吐与 GPU 利用率，用于调参对比。",
-        "长提示的 tokenizer 开销与模型最大上下文长度共同限制可用输入。",
-        "vLLM 等框架将引擎事件与周期指标写入日志，便于离线分析。",
-    )
-    parts: list[str] = []
-    total = 0
-    i = 0
-    while total < LONG20k_BODY_TARGET_CHARS:
-        s = phrases[i % len(phrases)]
-        parts.append(s)
-        total += len(s)
-        i += 1
-    body = "".join(parts)[:LONG20k_BODY_TARGET_CHARS]
+    body = _long20k_rotating_body()
     footer_first = "\n\n问题：下文是否明确论及「预填充」与「KV缓存」或同类键值缓存机制？只回答是或否。\n\n"
     footer_last = "\n\n问题：以上内容是否明确论及「预填充」与「KV缓存」或同类键值缓存机制？只回答是或否。"
     footer = footer_last if tail_header else footer_first
@@ -96,6 +105,62 @@ def _build_preset_long20k_question_last() -> str:
     return _build_preset_long20k(tail_header=True)
 
 
+_LONGBENCH_DUREADER_JSON_10K = "longbench_dureader_sample_10k.json"
+_LONGBENCH_DUREADER_JSON_20K = "longbench_dureader_sample_20k.json"
+
+
+@lru_cache(maxsize=16)
+def _load_longbench_json(rel_name: str) -> dict:
+    """读取脚本同目录下的 LongBench 外置样本 JSON（含 context / input 等字段）。"""
+    p = Path(__file__).resolve().parent / rel_name
+    if not p.is_file():
+        print(
+            f"错误：缺少外置样本文件 {p}。可从 DynamicKV/data/LongBench/*.jsonl 抽取样本写入该路径。",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"错误：无法读取或解析 {p}: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
+
+
+def _longbench_dureader_context_question(rel_name: str) -> tuple[str, str]:
+    """dureader 样本：非空 context + 问题 input（可为空串）。"""
+    data = _load_longbench_json(rel_name)
+    ctx = data.get("context")
+    if not isinstance(ctx, str) or not ctx.strip():
+        p = Path(__file__).resolve().parent / rel_name
+        print(f"错误：{p} 缺少非空字符串字段 context", file=sys.stderr)
+        raise SystemExit(2)
+    q = data.get("input")
+    question = q if isinstance(q, str) else ""
+    return ctx, question
+
+
+def _format_longbench_dureader_user_prompt(context: str, question: str) -> str:
+    """与 LongBench/config/dataset2prompt.json 中 dureader 模板一致。"""
+    return (
+        "请基于给定的文章回答下述问题。\n\n"
+        f"文章：{context}\n\n"
+        "请基于上述文章详细分析，回答下面的问题，最好能详细地回答，不要遗漏任何信息。\n\n"
+        f"问题：{question}\n回答：\n"
+    )
+
+
+def _build_preset_longbench_dureader_10k() -> str:
+    """LongBench dureader，约 10K 字级文章（见 longbench_dureader_sample_10k.json）。"""
+    ctx, q = _longbench_dureader_context_question(_LONGBENCH_DUREADER_JSON_10K)
+    return _format_longbench_dureader_user_prompt(ctx, q)
+
+
+def _build_preset_longbench_dureader_20k() -> str:
+    """LongBench dureader，约 20K 字级文章（见 longbench_dureader_sample_20k.json）。"""
+    ctx, q = _longbench_dureader_context_question(_LONGBENCH_DUREADER_JSON_20K)
+    return _format_longbench_dureader_user_prompt(ctx, q)
+
+
 # -p @<key> 选用；key 为自由文本时不要用 @ 前缀
 # 把所有内置模板集中在一个注册表里：字符串模板与运行时生成模板共用同一入口，便于维护与列出。
 PRESETS: dict[str, PresetValue] = {
@@ -109,6 +174,9 @@ PRESETS: dict[str, PresetValue] = {
     # 长上下文压测：对比「问题在前」vs「问题在后」
     "long20k_question_first": _build_preset_long20k_question_first,
     "long20k_question_last": _build_preset_long20k_question_last,
+    # LongBench：正文见同目录 JSON（真数据）；建议 --max-tokens 640+ 测长解码
+    "longbench_dureader_10k": _build_preset_longbench_dureader_10k,
+    "longbench_dureader_20k": _build_preset_longbench_dureader_20k,
 }
 
 
@@ -127,6 +195,12 @@ def _epilog_presets() -> str:
     )
     rows.append(
         f"long20k_question_last — 同主体；正文在前，preamble+问题在后（问题紧跟说明）"
+    )
+    rows.append(
+        "longbench_dureader_10k — LongBench/dureader + longbench_dureader_sample_10k.json（约 10K 字文章）；建议 --max-tokens>=640"
+    )
+    rows.append(
+        "longbench_dureader_20k — LongBench/dureader + longbench_dureader_sample_20k.json（约 20K 字文章）；建议 --max-tokens>=640"
     )
     rows.sort()
     return "内置提示（-p @<key>）：\n  " + "\n  ".join(rows)

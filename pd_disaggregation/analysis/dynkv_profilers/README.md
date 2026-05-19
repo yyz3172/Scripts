@@ -6,9 +6,10 @@
 
 | 脚本 | 功能 | 环境变量 |
 |------|------|----------|
-| `parse_profile_execute_duration.py` | 解析 `ProfileExecuteDuration` 各阶段耗时 | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1` |
-| `parse_dynkv_prepare_profile.py` | 解析 `_prepare_inputs` 阶段的 DynamicKV 耗时分解 | `VLLM_DYNKV_PROFILE_PREPARE=1` |
-| `parse_forward_profile.py` | 解析 `forward` 阶段的耗时分解 | `VLLM_DYNKV_PROFILE_FORWARD=1` |
+| `parse_profile_execute_duration.py` | 解析 `ProfileExecuteDuration` 各阶段耗时；**prepare input 为 CPU wall**（与 `VLLM_DYNKV_PROFILE_PREPARE` 无关） | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1` |
+| `parse_dynkv_prepare_profile.py` | 解析 `_prepare_inputs` 阶段耗时（ON=DynamicKV 全字段；OFF=标准路径，DynKV 字段为 0） | `VLLM_DYNKV_PROFILE_PREPARE=1` |
+| `parse_forward_profile.py` | 解析 `forward` 阶段的耗时分解 | `VLLM_DYNKV_PROFILE_FORWARD=1`（可选 `FIA` / `PA`） |
+| `parse_model_acl_profile.py` | 解析 `model_acl`（`_update_attn_pa_params`）细分 | `VLLM_DYNKV_PROFILE_MODEL_ACL=1` |
 
 ## 使用方法
 
@@ -23,6 +24,12 @@ export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
 # 启用 DynamicKV 性能日志（按需开启）
 export VLLM_DYNKV_PROFILE_PREPARE=1
 export VLLM_DYNKV_PROFILE_FORWARD=1
+# PA decode：graph replay NPU sync（graph_npu_ms / fwd_block_npu_ms）+ 可选 eager 逐层 PA
+export VLLM_DYNKV_PROFILE_PA=1
+# model_acl 细分：ctx_lens / block_table / graph_update / event_record
+export VLLM_DYNKV_PROFILE_MODEL_ACL=1
+# 可选：FIA eager 算子计时（32 sync/步）
+# export VLLM_DYNKV_PROFILE_FIA=1
 ```
 
 ### 2. 运行推理并收集日志
@@ -43,8 +50,15 @@ python parse_profile_execute_duration.py /path/to/decode.log
 # 解析 prepare_inputs 阶段
 python parse_dynkv_prepare_profile.py /path/to/decode.log
 
-# 解析 forward 阶段
+# 解析 forward 阶段（树形缩进：model_attn_op 在 model_attn 下）
 python parse_forward_profile.py /path/to/decode.log
+
+# 解析 model_acl（PA graph_task_update 细分）
+python parse_model_acl_profile.py /path/to/decode.log
+python parse_model_acl_profile.py decode_off.log decode_on.log
+
+# 对比 OFF / ON 两份日志
+python parse_forward_profile.py decode_off.log decode_on.log
 
 # 按 Ray worker 分桶
 python parse_dynkv_prepare_profile.py /path/to/decode.log --by-worker
@@ -67,7 +81,7 @@ Profile execute duration: tag=post process, duration=0.55ms
 
 ### `[DynamicKV][forward_profile]`
 ```
-[DynamicKV][forward_profile] ctx_setup=0.12ms kv_setup=0.05ms dynkv_pre=0.03ms model=48.50ms dynkv_post=0.02ms total=48.72ms
+[DynamicKV][forward_profile] ctx_setup=0.12ms kv_setup=0.05ms dynkv_pre=0.03ms model=48.50ms model_acl=0.05ms model_core=48.20ms model_graph_replay=19.50ms model_embed=0.08ms model_norm=0.04ms model_attn=18.00ms model_attn_op=10.50ms fia_ms_total=10.745 fia_kv_tokens_avg=19583.5 pa_ms_total=0.000 pa_kv_tokens_avg=2176.0 model_mlp=28.00ms model_layer_rms=2.12ms model_sp_pcp=0.01ms dynkv_post=0.02ms total=48.72ms
 ```
 
 ## 输出说明
@@ -82,17 +96,115 @@ Profile execute duration: tag=post process, duration=0.55ms
 | `broadcast` | TP 广播 `built_dyn` |
 | `stacked_tensor` | 构建 `stacked_dyn_lens_t` tensor |
 | `layer_copy_meta` | 每层 `copy(attn_metadata)` |
-| `layer_slot_remap` | 每层 slot_mapping 重映射 |
-| `layer_other` | 每层其他操作 |
-| `total_loop` | 每层循环总耗时 |
+| `layer_slot_remap` | 批量 slot remap（per-job ``[L,n_masked]`` scatter；P0b 全矩阵 gather 在 Ascend 上更慢已回退） |
+| `layer_ctx_fill_batch` | ON：循环外批量写 graph ``context_lens_buf``（P1：ctx workspace 一次 ``[L,n]`` 写；需重 capture） |
+| `layer_slot_assign` | stack remap 后 ``copy_`` 到 graph slot（统一 workspace 命中时为 0） |
+| `layer_meta_assign` | ON：每层仅 ``setattr`` 指向已填 buffer（原 ``layer_other`` 主体） |
+| `layer_other` | 与 ``layer_meta_assign`` 相同（兼容旧日志） |
+| `total_loop` | 每层循环相关耗时合计（= 下述四项之和） |
+| `  layer_slot_remap` | ↳ 批量 slot remap（循环前） |
+| `  layer_slot_assign` | ↳ 批量写入 graph slot buffer（循环前） |
+| `  layer_copy_meta` | ↳ 每层 copy metadata + slot 指针（循环内累加） |
+| `  layer_meta_assign` | ↳ 每层 setattr dyn kv 元数据（循环内累加） |
 
-### forward_profile 字段
+解析脚本 ``parse_dynkv_prepare_profile.py`` 打印时，上述四项缩进显示在 ``total_loop`` 行之后。
+
+### prepare_profile_ext 字段（P3）
+
+| 字段 | 说明 |
+|------|------|
+| `update_states` | ``execute_model`` 内 ``_update_states`` |
+| `prepare_core` | ``_prepare_inputs`` 中 attn 构建前（block_table/positions 等） |
+| `prepare_attn_build` | ``builder.build`` 构建 ``attn_metadata_i`` |
+| `prepare_kv_setup` | KV 组循环内、``builder.build`` 前（common metadata / block_table / padding） |
+| `prepare_cos_sin` | ``update_cos_sin(positions)`` |
+| `prepare_tail` | ``lmhead_tp`` pad 等收尾 |
+
+### prepare_profile_reconcile（对账 Profile ``prepare input``）
+
+每步一行，在 ``_prepare_inputs`` 结束打出：
+
+```text
+profile_prepare_est ≈ update_states + prepare_inputs_wall  ≈ Profile prepare input
+inner_sum = prepare_core + prepare_kv_setup + prepare_attn_build
+          + loop_sum + prepare_cos_sin + prepare_tail
+prepare_gap = prepare_inputs_wall - inner_sum   # _prepare_inputs 内未细分部分
+loop_sum    = 各 [prepare_profile] 行字段累加（stack/broadcast/ctx/total_loop 等）
+```
+
+| 字段 | 说明 |
+|------|------|
+| `prepare_inputs_wall` | 整段 ``_prepare_inputs`` 墙钟 |
+| `loop_sum` | 所有 ``[prepare_profile]`` loop 字段之和（每 attn_group 累加） |
+| `inner_sum` | 上述可加项合计 |
+| `prepare_gap` | wall − inner_sum（计时孔洞 / Python 开销） |
+| `profile_prepare_est` | update_states + wall，应对齐 ``parse_profile_execute_duration`` |
+
+**统一 slot workspace（消除 ``layer_slot_assign``）**：FULL PA graph capture 时预分配
+``[L, n_sm]`` 父 tensor，每层 ``slot_mapping`` 为 row view；runtime remap 写同一块内存。
+**修改后须重启/重 capture graph**；否则 ``data_ptr`` 校验失败会回退 stack+assign。
+
+### forward_profile 字段与层级（`parse_forward_profile.py`）
+
+解析脚本按 **PA / PIA** 自动分表。字段后缀：`*` = ortho（勿与同级相加）、`#` = 非时间指标。
+
+**PA graph（`[forward_profile][pa]`）— CPU 可相加分解：**
+
+```text
+profile_cpu_total ≈ ctx_setup + kv_setup + dynkv_pre + model_cpu + dynkv_post
+model_cpu ≈ model_acl + model()墙钟
+  model_acl
+  model_npu_ms ⊇ graph_npu_ms
+    graph_npu_ms*     # 同一次 replay 的 NPU
+    graph_replay_wall*  # 同一次 replay 的 CPU，与 graph_npu_ms 勿相加
+fwd_block_npu_ms†    # 独立 NPU 轴，≈ execute forward
+pa_kv_tokens_avg#
+```
+
+**PIA eager + FIA（`[forward_profile]` + `fia_ms_total`）— CPU hook 可相加：**
+
+```text
+profile_cpu_total ≈ ctx_setup + kv_setup + dynkv_pre + model + dynkv_post
+model ≈ model_core + model_sp_pcp
+  model_core ≈ model_embed + model_norm + model_attn + model_mlp + model_layer_rms
+    model_attn
+      model_attn_op
+        fia_ms_total*   # NPU FIA，与 model_attn_op 勿相加
+        fia_kv_tokens_avg#
+```
 
 | 字段 | 说明 |
 |------|------|
 | `ctx_setup` | `set_ascend_forward_context` 设置 |
 | `kv_setup` | `maybe_setup_kv_connector` |
 | `dynkv_pre` | DynamicKV 预处理（Decode 端应接近 0）|
-| `model` | 实际模型 forward（所有层）|
-| `dynkv_post` | DynamicKV 后处理（Decode 端应接近 0）|
-| `total` | forward 块总耗时 |
+| `model` / `model_cpu` | PIA：`model` 墙钟；PA：`model_cpu` 同义 |
+| `model_acl` | `_update_aclgraph_attn_params`（replay **之前**；PIA eager 常为 0） |
+| `model_core` | `self.model(...)` 墙钟（PIA hook 父节点） |
+| `graph_replay_wall` / `model_graph_replay` | `replay()` CPU（PA）；与 `graph_npu_ms` 交叉，**勿相加** |
+| `graph_npu_ms` | `PROFILE_PA=1`：`replay()` NPU sync 整图时间 |
+| `model_npu_ms` | 整段 `self.model()` NPU；**⊇** `graph_npu_ms`，勿与 `model_acl` 相加 |
+| `fwd_block_npu_ms` | 整段 forward context NPU，≈ **execute forward** |
+| `model_embed` / `model_norm` / `model_attn` / `model_mlp` | PIA：32 层 hook 累计（CPU） |
+| `model_attn_op` | PIA：Attention 算子墙钟 |
+| `fia_ms_total` | PIA：`PROFILE_FIA=1`，32 层 FIA NPU 合计 |
+| `fia_kv_tokens_avg` / `pa_kv_tokens_avg` | metadata 统计（非时间） |
+| `model_layer_rms` | `model_core - attn - mlp` 余量 |
+| `model_sp_pcp` | SP all-gather / PCP restore |
+| `dynkv_post` | DynamicKV 后处理 |
+| `profile_cpu_total` | forward 块 CPU 总墙钟 |
+
+### model_acl_profile 字段
+
+| 字段 | 说明 |
+|------|------|
+| `layers` | 本步 PA graph 更新的层数（通常 32） |
+| `ctx_lens` | `pa_dynamic_kv_context_lens_for_graph_update`（含 `copy_`） |
+| `block_table` | 从 metadata 绑定 `block_tables` |
+| `block_table_swap` | 本步中 `meta.block_tables` 与 capture 时 `attn_params` 指针不一致的层数 |
+| `graph_update` | `gu_begin` + `gu_pa` + `gu_end` 合计 |
+| `gu_begin` / `gu_pa` / `gu_end` | `graph_task_update_begin`、PA 重绑调用、`graph_task_update_end` |
+| `event_record` | 每层 `ExternalEvent.record` |
+| `loop_other` | `total` 减去上述分项（zip/解包等余量） |
+| `total` | 整段 `_update_attn_pa_params` 墙钟 |
+| `per_layer_ctx` / `per_layer_graph_update` | 每层均值（ms） |

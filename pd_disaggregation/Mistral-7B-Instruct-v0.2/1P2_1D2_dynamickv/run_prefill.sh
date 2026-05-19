@@ -44,6 +44,11 @@ export VLLM_DP_SIZE_LOCAL=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
+
+# Profiling（配合 analysis/dynkv_profilers/ 解析 prefill.log）
+export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
+export VLLM_DYNKV_PROFILE_PREPARE=0
+export VLLM_DYNKV_PROFILE_FORWARD=0
 if [ "$dp_size" -gt 1 ]; then
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 else
@@ -68,6 +73,7 @@ vllm serve "$model_path" \
     --enforce-eager \
     --additional-config \
     '{
+        "pa_shape_list": [1, 2, 4, 8, 16, 24, 32, 48, 64, 72, 80, 96, 128, 256],
         "dynamic_kv": {
             "enabled": true,
             "impl": "offload",

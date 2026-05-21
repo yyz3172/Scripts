@@ -51,6 +51,29 @@ export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
 export VLLM_DYNKV_PROFILE_PREPARE=0
 export VLLM_DYNKV_PROFILE_FORWARD=0
 
+# --- Ascend PyTorch Profiler → MindStudio Insight（默认 0；设为 1 开启）---
+# INSIGHT_PROFILER_ENABLE=1 时：设置 VLLM_TORCH_PROFILER_DIR 并挂载 /start_profile API
+# （vllm-ascend patch；可不传 --profiler-config）。建议同时传 --profiler-config 与目录一致。
+INSIGHT_PROFILER_ENABLE="${INSIGHT_PROFILER_ENABLE:-0}"
+PROFILER_CONFIG_ARG=""
+PROFILER_CONFIG_VAL=""
+if [ "$INSIGHT_PROFILER_ENABLE" = "1" ]; then
+  PROFILER_DIR="${PROFILER_DIR:-/root/autodl-tmp/yyz/vllm_insight_decode}"
+  mkdir -p "$PROFILER_DIR"
+  export VLLM_TORCH_PROFILER_DIR="$PROFILER_DIR"
+  export VLLM_TORCH_PROFILER_WITH_STACK=0
+  export VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=0
+  export VLLM_ASCEND_TORCH_PROFILER_EXPORT_TYPE=db
+  export VLLM_ASCEND_TORCH_PROFILER_LEVEL=1
+  # 采集用 text（避免 stop 时 msprof daemon 报错）；stop 后 worker 内再转 db
+  export VLLM_ASCEND_TORCH_PROFILER_CAPTURE_EXPORT=text
+  export VLLM_ASCEND_TORCH_PROFILER_ANALYSE_ONLINE=0
+  export VLLM_ASCEND_TORCH_PROFILER_ACTIVE_STEPS=512
+  export VLLM_RPC_TIMEOUT=1800000
+  PROFILER_CONFIG_ARG="--profiler-config"
+  PROFILER_CONFIG_VAL="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"${PROFILER_DIR}\"}"
+fi
+
 if [ "$dp_size" -gt 1 ]; then
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 else
@@ -60,7 +83,9 @@ LOG_DIR="${LOG_DIR:-.}"
 mkdir -p "$LOG_DIR"
 exec >> "${LOG_DIR}/decode.log" 2>&1
 
+# shellcheck disable=SC2086
 vllm serve "$model_path" \
+    $PROFILER_CONFIG_ARG $PROFILER_CONFIG_VAL \
     --host 0.0.0.0 \
     --port $engine_port \
     --tensor-parallel-size 2 \

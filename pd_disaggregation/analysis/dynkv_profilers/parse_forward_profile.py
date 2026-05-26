@@ -45,6 +45,7 @@ def _specs(*entries: tuple[str, int, FieldKind, frozenset[Mode]]) -> list[FieldS
 
 # 公共前缀 + 分模式字段（顺序即打印顺序）
 _FIELD_SPECS: list[FieldSpec] = _specs(
+    ("dynkv", 0, "metric", frozenset({"pa", "pia", "pia_fia"})),
     ("ctx_setup", 0, "cpu", frozenset({"pa", "pia", "pia_fia"})),
     ("kv_setup", 0, "cpu", frozenset({"pa", "pia", "pia_fia"})),
     ("dynkv_pre", 0, "cpu", frozenset({"pa", "pia", "pia_fia"})),
@@ -191,8 +192,14 @@ def parse_log(
     )
     modes: dict[tuple[str, ...], Mode] = {}
     matched = 0
+    status_printed = False
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
+            if not status_printed and "[DynamicKV][profile_status]" in line:
+                print("== DynamicKV profile_status (from log) ==")
+                print(line.strip())
+                print()
+                status_printed = True
             m = LINE_RE.search(line)
             if not m:
                 continue

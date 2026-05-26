@@ -164,6 +164,13 @@ def main() -> None:
         f"log{i}" for i in range(len(args.log_paths))
     ]
     for label, path in zip(labels, args.log_paths):
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "[DynamicKV][profile_status]" in line:
+                    print(f"== profile_status [{label}] ==")
+                    print(line.strip())
+                    print()
+                    break
         matched, stats = parse_log(path, by_worker=args.by_worker)
         print(f"File [{label}]: {path}")
         print(f"Matched [DynamicKV][model_acl_profile] lines: {matched}")

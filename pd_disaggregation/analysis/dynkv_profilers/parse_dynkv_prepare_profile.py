@@ -28,6 +28,7 @@ LINE_RE = re.compile(r"\[DynamicKV\]\[prepare_profile\]\s+(.+)$")
 LINE_EXT_RE = re.compile(r"\[DynamicKV\]\[prepare_profile_ext\]\s+(.+)$")
 LINE_RECONCILE_RE = re.compile(
     r"\[DynamicKV\]\[prepare_profile_reconcile\]\s+(.+)$")
+LINE_STATUS_RE = re.compile(r"\[DynamicKV\]\[profile_status\]\s+(.+)$")
 
 # 各字段：key=X.XXms 或 key=N（整数如 layers）
 FIELD_RE = re.compile(r"(\w+)=([\d.]+)(ms)?")
@@ -130,6 +131,7 @@ def _print_table(title: str, tag_vals: dict[str, list[float]]) -> None:
     child_set = set(TOTAL_LOOP_CHILDREN)
     # 主字段顺序；``total_loop`` 四项子字段在打印时缩进挂在 ``total_loop`` 下
     order = [
+        "dynkv",
         "update_states",
         "prepare_inputs_wall",
         "prepare_core",
@@ -215,6 +217,15 @@ def main() -> None:
         help="Split stats by Ray-style worker prefix (IntegratedWorker pid=...).",
     )
     args = ap.parse_args()
+
+    with open(args.log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            sm = LINE_STATUS_RE.search(line)
+            if sm:
+                print("== DynamicKV profile_status (from log) ==")
+                print(sm.group(0).strip())
+                print()
+                break
 
     matched, stats = parse_log(args.log_path, by_worker=args.by_worker)
     matched_ext, stats_ext = parse_log(

@@ -84,7 +84,8 @@ vllm serve "$model_path" \
             "radio_max": 10.0,
             "min_rewrite_delta": 1,
             "pooling": "avgpool",
-            "kernel_size": 7
+            "kernel_size": 7,
+            "uniform_kv_budget": "fixed_base"
         }
     }' \
     --kv-transfer-config \

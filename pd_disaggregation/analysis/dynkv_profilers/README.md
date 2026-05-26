@@ -15,7 +15,7 @@
 
 ### 1. 启用日志
 
-在 Decode worker 启动时设置对应的环境变量：
+在 Decode worker 启动时设置对应的环境变量（``1P2_1D2_dynamickv_pa/run_decode.sh`` 已预置推荐组合）：
 
 ```bash
 # 启用 ProfileExecuteDuration 基础计时
@@ -25,12 +25,30 @@ export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
 export VLLM_DYNKV_PROFILE_PREPARE=1
 export VLLM_DYNKV_PROFILE_FORWARD=1
 # PA decode：graph replay NPU sync（graph_npu_ms / fwd_block_npu_ms）+ 可选 eager 逐层 PA
-export VLLM_DYNKV_PROFILE_PA=1
-# model_acl 细分：ctx_lens / block_table / graph_update / event_record
+export VLLM_DYNKV_PROFILE_PA=0   # PA graph 路径可选 1；与 FORWARD 联用
+# model_acl 细分：ctx_lens / block_table / graph_update / event_record（B6 分析必开）
 export VLLM_DYNKV_PROFILE_MODEL_ACL=1
-# 可选：FIA eager 算子计时（32 sync/步）
+# 可选：FIA eager 算子计时（32 sync/步，仅 PIA 目录 run_decode.sh）
 # export VLLM_DYNKV_PROFILE_FIA=1
 ```
+
+**additional_config** 需与代码一致（algo-2 Phase A/B）：
+
+```json
+"dynamic_kv": {
+  "enabled": true,
+  "uniform_kv_budget": "fixed_base"
+}
+```
+
+启动后首步 decode 会打**一行**配置摘要（仅一次）：
+
+```text
+[DynamicKV][profile_status] dynkv_enabled=True impl=offload uniform_kv_budget=fixed_base ...
+  PROFILE: PREPARE=1 FORWARD=1 MODEL_ACL=1 ...
+```
+
+可用 ``grep profile_status decode.log`` 确认 DynamicKV 与 profile 开关是否生效。
 
 ### 2. 运行推理并收集日志
 
@@ -74,14 +92,26 @@ Profile execute duration: tag=Sample, duration=0.70ms
 Profile execute duration: tag=post process, duration=0.55ms
 ```
 
-### `[DynamicKV][prepare_profile]`
+### `[DynamicKV][profile_status]`（一次性）
+
 ```
-[DynamicKV][prepare_profile] layers=32 stack_init=0.02ms kv_list_build=0.01ms build_helper=0.25ms broadcast=0.37ms stacked_tensor=0.04ms layer_copy_meta=0.31ms layer_slot_remap=1.85ms layer_other=0.59ms total_loop=2.75ms
+[DynamicKV][profile_status] dynkv_enabled=True impl=offload uniform_kv_budget=fixed_base ... PROFILE: PREPARE=1 FORWARD=1 MODEL_ACL=0 ...
+```
+
+### `[DynamicKV][prepare_profile]`
+
+自 v0.13 DynamicKV 优化起，行首带 ``dynkv=0|1``（解析脚本会统计为字段 ``dynkv``，可忽略或用于过滤）：
+
+```
+[DynamicKV][prepare_profile] dynkv=1 layers=32 stack_init=0.02ms kv_list_build=0.01ms build_helper=0.25ms broadcast=0.37ms stacked_tensor=0.04ms layer_ctx_fill_batch=0.50ms layer_copy_meta=0.31ms layer_slot_remap=1.85ms layer_meta_assign=0.59ms total_loop=2.75ms
 ```
 
 ### `[DynamicKV][forward_profile]`
+
+PA graph 为 ``[forward_profile][pa]``，同样带 ``dynkv=1``：
+
 ```
-[DynamicKV][forward_profile] ctx_setup=0.12ms kv_setup=0.05ms dynkv_pre=0.03ms model=48.50ms model_acl=0.05ms model_core=48.20ms model_graph_replay=19.50ms model_embed=0.08ms model_norm=0.04ms model_attn=18.00ms model_attn_op=10.50ms fia_ms_total=10.745 fia_kv_tokens_avg=19583.5 pa_ms_total=0.000 pa_kv_tokens_avg=2176.0 model_mlp=28.00ms model_layer_rms=2.12ms model_sp_pcp=0.01ms dynkv_post=0.02ms total=48.72ms
+[DynamicKV][forward_profile][pa] dynkv=1 ctx_setup=0.12ms kv_setup=0.05ms dynkv_pre=0.03ms model_cpu=19.29ms model_acl=2.50ms graph_replay_wall=16.00ms graph_npu_ms=15.80ms ... profile_cpu_total=19.50ms
 ```
 
 ## 输出说明

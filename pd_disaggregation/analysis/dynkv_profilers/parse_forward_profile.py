@@ -7,8 +7,11 @@
 
     python parse_forward_profile.py /path/to/decode.log
     python parse_forward_profile.py decode_off.log decode_on.log
+    python parse_forward_profile.py /path/to/decode.log
+    python parse_forward_profile.py /path/to/decode.log --view full
 
-环境变量见 README；PA 日志带 ``[forward_profile][pa]``，PIA eager 为 ``[forward_profile]`` + FIA 字段。
+默认解析决策字段行（无 ``ctx_setup``）；``--view full`` 为旧版全字段行。
+环境变量见 README；PA 日志带 ``[forward_profile][pa]``。
 """
 
 from __future__ import annotations
@@ -182,10 +185,18 @@ def _field_display(name: str, depth: int, kind: FieldKind) -> str:
     return f"{' ' * (_INDENT_STEP * depth)}{label}"
 
 
+def _is_legacy_forward_profile(fields: dict[str, float]) -> bool:
+    """Legacy full lines include ctx_setup; current profile lines do not."""
+    return "ctx_setup" in fields
+
+
 def parse_log(
     path: str,
     *,
     by_worker: bool,
+    line_re: re.Pattern[str] = LINE_RE,
+    legacy_only: bool = False,
+    decision_only: bool = False,
 ) -> tuple[int, dict[tuple[str, ...], dict[str, list[float]]], dict[tuple[str, ...], Mode]]:
     stats: dict[tuple[str, ...], dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list),
@@ -200,11 +211,16 @@ def parse_log(
                 print(line.strip())
                 print()
                 status_printed = True
-            m = LINE_RE.search(line)
+            m = line_re.search(line)
             if not m:
                 continue
             fields = _parse_fields(m.group(1))
             if not fields:
+                continue
+            is_legacy = _is_legacy_forward_profile(fields)
+            if legacy_only and not is_legacy:
+                continue
+            if decision_only and is_legacy:
                 continue
             matched += 1
             mode = _detect_mode(fields, line)
@@ -274,32 +290,98 @@ def _print_table(
     print()
 
 
+def _mean(tag_vals: dict[str, list[float]], name: str) -> float:
+    vals = tag_vals.get(name) or []
+    if not vals:
+        return float("nan")
+    return sum(vals) / len(vals)
+
+PROFILE_FIELDS_PA = (
+    "dynkv",
+    "profile_cpu_total",
+    "model_acl",
+    "model_replay_est",
+    "graph_npu_ms",
+    "fwd_block_npu_ms",
+    "pa_kv_tokens_avg",
+)
+
+PROFILE_FIELDS_PIA = (
+    "dynkv",
+    "profile_cpu_total",
+    "model",
+    "model_core",
+    "model_attn_op",
+    "fia_ms_total",
+    "pa_ms_total",
+    "pa_kv_tokens_avg",
+)
+
+
+def _print_profile_table(
+    title: str,
+    tag_vals: dict[str, list[float]],
+    mode: Mode,
+) -> None:
+    fields = PROFILE_FIELDS_PA if mode == "pa" else PROFILE_FIELDS_PIA
+    field_w = 28
+    print(title)
+    print(f"  mode={'PA graph' if mode == 'pa' else 'PIA eager'}")
+    hdr = f"{'field':<{field_w}} {'cnt':>6} {'mean':>8} {'p50':>8} {'p90':>8}"
+    print(hdr)
+    print("-" * len(hdr))
+    for tag in fields:
+        vals = tag_vals.get(tag)
+        if not vals:
+            continue
+        n = len(vals)
+        srt = sorted(vals)
+        mean = sum(vals) / n
+        p50 = _percentile_linear(srt, 50.0)
+        p90 = _percentile_linear(srt, 90.0)
+        print(f"{tag:<{field_w}} {n:>6} {mean:>8.3f} {p50:>8.3f} {p90:>8.3f}")
+    print()
+
+
 def _print_file_report(
     path: str,
     *,
     by_worker: bool,
     label: str | None = None,
+    view: str = "default",
 ) -> tuple[int, dict[tuple[str, ...], dict[str, list[float]]]]:
-    matched, stats, modes = parse_log(path, by_worker=by_worker)
+    decision_only = view == "default"
+    legacy_only = view == "full"
+    matched, stats, modes = parse_log(
+        path,
+        by_worker=by_worker,
+        decision_only=decision_only,
+        legacy_only=legacy_only,
+    )
     header = label or path
     print(f"File: {header}")
-    print(f"Matched [DynamicKV][forward_profile] lines: {matched}")
+    label_kind = "decision" if decision_only else "legacy full"
+    print(f"Matched [forward_profile] ({label_kind}) lines: {matched}")
     if matched == 0:
         print(
             "  (no lines — need VLLM_DYNKV_PROFILE_FORWARD=1 on decode worker)",
         )
         print()
         return matched, stats
+
     keys = sorted(stats.keys())
     for key in keys:
-        mode = modes[key]
+        mode = modes.get(key) or "pa"
         suffix = ""
         if by_worker and len(key) >= 2:
             suffix = f" | worker={key[0]} | {mode}"
         elif len(key) >= 1:
             suffix = f" | {mode}"
         title = f"== Forward Profile | {header}{suffix} =="
-        _print_table(title, stats[key], mode)
+        if view == "default":
+            _print_profile_table(title, stats[key], mode)
+        else:
+            _print_table(title, stats[key], mode)
     return matched, stats
 
 
@@ -317,6 +399,12 @@ def main() -> None:
         action="store_true",
         help="Split stats by Ray-style worker prefix.",
     )
+    ap.add_argument(
+        "--view",
+        choices=["default", "full"],
+        default="default",
+        help="default=decision fields (no ctx_setup); full=legacy all fields.",
+    )
     args = ap.parse_args()
 
     any_matched = False
@@ -329,6 +417,7 @@ def main() -> None:
             path,
             by_worker=args.by_worker,
             label=label,
+            view=args.view,
         )
         any_matched = any_matched or matched > 0
 

@@ -47,16 +47,12 @@ export TASK_QUEUE_ENABLE=1
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
 # Profiling（配合 analysis/dynkv_profilers/ 解析 decode.log）
-# 启动后首步会打一行 [DynamicKV][profile_status]（任一 PROFILE_*=1 时）
 export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
 export VLLM_DYNKV_PROFILE_PREPARE=1
-# B6 / forward 分解：建议与 PREPARE 同时开启
 export VLLM_DYNKV_PROFILE_FORWARD=1
 # PA FULL_DECODE_ONLY：graph replay NPU（可选，与 FORWARD 联用）
 export VLLM_DYNKV_PROFILE_PA=0
-# model_acl 细分（_update_attn_pa_params，B6 决策关键）
 export VLLM_DYNKV_PROFILE_MODEL_ACL=1
-# 可选：export VLLM_DYNKV_PROFILE_FIA=1  # PIA eager 路径（本目录为 PA graph，勿开）
 
 if [ "$dp_size" -gt 1 ]; then
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1

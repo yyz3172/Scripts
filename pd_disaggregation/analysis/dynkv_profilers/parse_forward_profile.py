@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""
-从 vLLM-Ascend 日志中解析 ``[DynamicKV][forward_profile] ...`` 行，
-统计 forward 各阶段耗时：ctx_setup, kv_setup, dynkv_pre, model, dynkv_post, total。
-
-用法::
-
-    python parse_forward_profile.py /path/to/decode.log
-    python parse_forward_profile.py decode_off.log decode_on.log
-    python parse_forward_profile.py /path/to/decode.log
-    python parse_forward_profile.py /path/to/decode.log --view full
-
-默认解析决策字段行（无 ``ctx_setup``）；``--view full`` 为旧版全字段行。
-环境变量见 README；PA 日志带 ``[forward_profile][pa]``。
-"""
+"""解析 [DynamicKV][forward_profile] 决策字段行，输出统计（ms）。"""
 
 from __future__ import annotations
 
@@ -85,27 +72,6 @@ _SPEC_BY_NAME: dict[str, FieldSpec] = {s.name: s for s in FIELD_SPECS}
 
 _INDENT_STEP = 4
 _FIELD_COL_WIDTH = 26
-
-_MODE_HINTS: dict[Mode, list[str]] = {
-    "pa": [
-        "CPU 分解: profile_cpu_total ≈ ctx_setup + kv_setup + dynkv_pre + model_cpu + dynkv_post",
-        "model_cpu ≈ model_acl + model() 墙钟；model() 墙钟可用 (model_cpu - model_acl) 估算",
-        "model_npu_ms ⊇ graph_npu_ms（均包 self.model() 内 replay，勿与 model_acl 相加）",
-        "graph_replay_wall 与 graph_npu_ms 量同一次 replay()（CPU vs NPU），勿相加",
-        "fwd_block_npu_ms ≈ Profile execute forward（整段 forward context NPU）",
-    ],
-    "pia": [
-        "CPU 分解: profile_cpu_total ≈ ctx_setup + kv_setup + dynkv_pre + model + dynkv_post",
-        "model ≈ model_core + model_sp_pcp；model_core ≈ embed + norm + attn + mlp + layer_rms（hook 累计）",
-        "PIA eager 无 FULL graph：model_acl / graph_* 通常为 0 或缺失",
-    ],
-    "pia_fia": [
-        "CPU 分解同 PIA；model_attn_op 为 Attention 算子 perf_counter 墙钟",
-        "fia_ms_total 为 32 层 FIA NPU Event 合计，与 model_attn_op 交叉验证，勿相加",
-        "fia_kv_tokens_avg 为 metadata 统计（非时间）",
-    ],
-}
-
 
 def _parse_fields(rest: str) -> dict[str, float]:
     out: dict[str, float] = {}
@@ -203,14 +169,8 @@ def parse_log(
     )
     modes: dict[tuple[str, ...], Mode] = {}
     matched = 0
-    status_printed = False
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            if not status_printed and "[DynamicKV][profile_status]" in line:
-                print("== DynamicKV profile_status (from log) ==")
-                print(line.strip())
-                print()
-                status_printed = True
             m = line_re.search(line)
             if not m:
                 continue
@@ -235,7 +195,6 @@ def parse_log(
 
 
 def _print_table(
-    title: str,
     tag_vals: dict[str, list[float]],
     mode: Mode,
 ) -> None:
@@ -269,11 +228,6 @@ def _print_table(
             p99,
         ))
 
-    mode_label = {"pa": "PA graph", "pia": "PIA eager", "pia_fia": "PIA eager + FIA"}[mode]
-    print(title)
-    print(f"  mode={mode_label}  *ortho=勿与同级相加  #metric=非时间  †顶层NPU轴")
-    for hint in _MODE_HINTS[mode]:
-        print(f"  {hint}")
     col_w = max(_FIELD_COL_WIDTH, max((len(r[1]) for r in rows), default=0))
     hdr = (
         f"{'field':<{col_w}} {'cnt':>6} {'mean':>8} {'min':>8} "
@@ -319,14 +273,11 @@ PROFILE_FIELDS_PIA = (
 
 
 def _print_profile_table(
-    title: str,
     tag_vals: dict[str, list[float]],
     mode: Mode,
 ) -> None:
     fields = PROFILE_FIELDS_PA if mode == "pa" else PROFILE_FIELDS_PIA
     field_w = 28
-    print(title)
-    print(f"  mode={'PA graph' if mode == 'pa' else 'PIA eager'}")
     hdr = f"{'field':<{field_w}} {'cnt':>6} {'mean':>8} {'p50':>8} {'p90':>8}"
     print(hdr)
     print("-" * len(hdr))
@@ -358,30 +309,22 @@ def _print_file_report(
         decision_only=decision_only,
         legacy_only=legacy_only,
     )
-    header = label or path
-    print(f"File: {header}")
-    label_kind = "decision" if decision_only else "legacy full"
-    print(f"Matched [forward_profile] ({label_kind}) lines: {matched}")
     if matched == 0:
         print(
-            "  (no lines — need VLLM_DYNKV_PROFILE_FORWARD=1 on decode worker)",
+            "no [forward_profile] lines (VLLM_DYNKV_PROFILE_FORWARD=1)",
+            file=sys.stderr,
         )
-        print()
         return matched, stats
 
     keys = sorted(stats.keys())
-    for key in keys:
+    for i, key in enumerate(keys):
+        if i:
+            print()
         mode = modes.get(key) or "pa"
-        suffix = ""
-        if by_worker and len(key) >= 2:
-            suffix = f" | worker={key[0]} | {mode}"
-        elif len(key) >= 1:
-            suffix = f" | {mode}"
-        title = f"== Forward Profile | {header}{suffix} =="
         if view == "default":
-            _print_profile_table(title, stats[key], mode)
+            _print_profile_table(stats[key], mode)
         else:
-            _print_table(title, stats[key], mode)
+            _print_table(stats[key], mode)
     return matched, stats
 
 

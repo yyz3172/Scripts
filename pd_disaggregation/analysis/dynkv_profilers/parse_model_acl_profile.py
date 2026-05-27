@@ -1,27 +1,11 @@
 #!/usr/bin/env python3
-"""
-从 vLLM-Ascend 日志中解析 ``[DynamicKV][model_acl_profile] ...`` 行，
-统计 ``_update_attn_pa_params``（``model_acl``）各阶段耗时。
-
-日志行示例::
-
-    [DynamicKV][model_acl_profile] layers=32 ctx_lens=0.12ms block_table=0.05ms graph_update=5.20ms event_record=0.80ms loop_other=0.10ms total=6.27ms per_layer_ctx=0.004ms per_layer_graph_update=0.163ms
-
-用法::
-
-    python parse_model_acl_profile.py /path/to/decode.log
-    python parse_model_acl_profile.py decode_off.log decode_on.log
-    python parse_model_acl_profile.py /path/to/decode.log --by-worker
-
-需要设置环境变量启用日志::
-
-    export VLLM_DYNKV_PROFILE_MODEL_ACL=1
-"""
+"""解析 [DynamicKV][model_acl_profile] 行，输出各字段统计（ms）。"""
 
 from __future__ import annotations
 
 import argparse
 import re
+import sys
 from collections import defaultdict
 
 LINE_RE = re.compile(r"\[DynamicKV\]\[model_acl_profile\]\s+(.+)$")
@@ -101,7 +85,7 @@ def parse_log(
     return matched, stats
 
 
-def _print_table(title: str, tag_vals: dict[str, list[float]]) -> None:
+def _print_table(tag_vals: dict[str, list[float]]) -> None:
 
     def sort_key(item: tuple[str, list[float]]) -> tuple[int, str]:
         tag = item[0]
@@ -129,7 +113,6 @@ def _print_table(title: str, tag_vals: dict[str, list[float]]) -> None:
             _percentile_linear(srt, 95.0),
             _percentile_linear(srt, 99.0),
         ))
-    print(title)
     hdr = (
         f"{'field':<24} {'cnt':>6} {'mean':>8} {'min':>8} {'max':>8} "
         f"{'p50':>8} {'p90':>8} {'p95':>8} {'p99':>8}"
@@ -163,31 +146,28 @@ def main() -> None:
     labels = ["OFF", "ON"] if len(args.log_paths) == 2 else [
         f"log{i}" for i in range(len(args.log_paths))
     ]
+    any_matched = False
+    sep = False
     for label, path in zip(labels, args.log_paths):
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if "[DynamicKV][profile_status]" in line:
-                    print(f"== profile_status [{label}] ==")
-                    print(line.strip())
-                    print()
-                    break
         matched, stats = parse_log(path, by_worker=args.by_worker)
-        print(f"File [{label}]: {path}")
-        print(f"Matched [DynamicKV][model_acl_profile] lines: {matched}")
         if matched == 0:
             print(
-                "No matching lines. Enable VLLM_DYNKV_PROFILE_MODEL_ACL=1 "
-                "on PA FULL_DECODE_ONLY decode worker.\n",
+                f"no [model_acl_profile] lines in {path} "
+                f"(VLLM_DYNKV_PROFILE_MODEL_ACL=1)",
+                file=sys.stderr,
             )
             continue
+        any_matched = True
+        if len(args.log_paths) > 1:
+            print(f"# {label}", file=sys.stderr)
         keys = sorted(stats.keys())
         for key in keys:
-            if args.by_worker and key:
-                title = (
-                    f"== model_acl_profile [{label}] | worker={key[0]} ==")
-            else:
-                title = f"== model_acl_profile [{label}] =="
-            _print_table(title, stats[key])
+            if sep:
+                print()
+            sep = True
+            _print_table(stats[key])
+    if not any_matched:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

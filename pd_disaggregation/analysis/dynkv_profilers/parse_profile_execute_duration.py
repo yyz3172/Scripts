@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
-"""
-从 vLLM-Ascend 日志中解析 ``Profile execute duration [Decode|Prefill]: ...`` 行，
-按阶段（Decode / Prefill）与字段 tag 统计：条数、均值、最小、最大、
-P50 / P90 / P95 / P99（毫秒，线性插值分位数）。
-
-日志行示例（可能带 Ray / worker 前缀）::
-
-    Profile execute duration [Decode]: [post process]:14.17ms [prepare input]:9.57ms [forward]:45.12ms
-
-用法::
-
-    python parse_profile_execute_duration.py /path/to/decode.log
-    python parse_profile_execute_duration.py /path/to/decode.log --by-worker
-"""
+"""解析 Profile execute duration 行，输出各 tag 统计（ms）。"""
 
 from __future__ import annotations
 
 import argparse
 import re
+import sys
 from collections import defaultdict
 
 # 整行锚点：``Profile execute duration [Decode]:`` 之后为一串 ``[tag]:X.XXms``
@@ -95,7 +83,7 @@ def parse_log(
     return matched, stats
 
 
-def _print_table(title: str, tag_vals: dict[str, list[float]]) -> None:
+def _print_table(tag_vals: dict[str, list[float]]) -> None:
     rows: list[
         tuple[str, int, float, float, float, float, float, float, float]
     ] = []
@@ -112,7 +100,6 @@ def _print_table(title: str, tag_vals: dict[str, list[float]]) -> None:
         p95 = _percentile_linear(srt, 95.0)
         p99 = _percentile_linear(srt, 99.0)
         rows.append((tag, n, mean, vmin, vmax, p50, p90, p95, p99))
-    print(title)
     hdr = (
         f"{'tag':<32} {'cnt':>6} {'mean':>8} {'min':>8} {'max':>8} "
         f"{'p50':>8} {'p90':>8} {'p95':>8} {'p99':>8}"
@@ -144,26 +131,19 @@ def main() -> None:
     args = ap.parse_args()
 
     matched, stats = parse_log(args.log_path, by_worker=args.by_worker)
-    print(f"File: {args.log_path}")
-    print(f"Matched Profile execute duration lines: {matched}")
     if matched == 0:
         print(
-            "No matching lines. Ensure logs contain "
-            "'Profile execute duration [Decode|Prefill]:' "
-            "and VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1 was enabled.",
+            "no Profile execute duration lines "
+            "(VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1)",
+            file=sys.stderr,
         )
-        return
+        sys.exit(1)
 
-    # 稳定输出顺序：先 phase，再 worker
     keys = sorted(stats.keys(), key=lambda k: (k[0], k[1:]))
-    for key in keys:
-        phase = key[0]
-        if args.by_worker and len(key) > 1:
-            worker = key[1]
-            title = f"== {phase} | worker={worker} =="
-        else:
-            title = f"== {phase} =="
-        _print_table(title, stats[key])
+    for i, key in enumerate(keys):
+        if i:
+            print()
+        _print_table(stats[key])
 
 
 if __name__ == "__main__":

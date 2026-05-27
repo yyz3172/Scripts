@@ -6,6 +6,7 @@
 
 | 脚本 | 功能 | 环境变量 |
 |------|------|----------|
+| **`run_dynkv_profilers.py`** | **一次运行下面四个解析脚本** | （无，仅聚合调用） |
 | `parse_profile_execute_duration.py` | 解析 `ProfileExecuteDuration` 各阶段耗时；**prepare input 为 CPU wall**（与 `VLLM_DYNKV_PROFILE_PREPARE` 无关） | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1` |
 | `parse_dynkv_prepare_profile.py` | 解析 `_prepare_inputs` 阶段耗时（ON=DynamicKV 全字段；OFF=标准路径，DynKV 字段为 0） | `VLLM_DYNKV_PROFILE_PREPARE=1` |
 | `parse_forward_profile.py` | 解析 `forward` 阶段的耗时分解 | `VLLM_DYNKV_PROFILE_FORWARD=1`（可选 `FIA` / `PA`） |
@@ -62,6 +63,11 @@ python -m vllm.entrypoints.openai.api_server ... 2>&1 | tee decode.log
 ```bash
 cd /path/to/Scripts/pd_disaggregation/analysis/dynkv_profilers
 
+# 推荐：一次跑齐四个解析脚本（单份日志）
+python run_dynkv_profilers.py /path/to/decode.log
+python run_dynkv_profilers.py /path/to/decode.log --by-worker
+
+# 单独解析（与上面等价的分项）
 # 解析 ProfileExecuteDuration 各阶段（prepare input, forward, Sample, post process）
 python parse_profile_execute_duration.py /path/to/decode.log
 

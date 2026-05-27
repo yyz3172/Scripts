@@ -1,6 +1,6 @@
 #!/bin/sh
-# Mistral-7B-Instruct-v0.2/1P1_1D1_dynamickv：单机 1 个 P（1 卡 TP=1）+ 1 个 D（1 卡 TP=1），共 2 卡。
-# 与 run_decode.sh 配套；在原 1P1_1D1 基础上开启 DynamicKV（--additional-config）。
+# Mistral-7B-Instruct-v0.2/1P2_1D2_dynamickv_pia：单机 1 个 Prefill（2 卡 TP=2），与 PIA decode 配套。
+# Prefill 与 decode 使用相同 dynamic_kv 配置（含 head_aggregation=sum）。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
 model_path="/root/autodl-tmp/models/Mistral-7B-Instruct-v0.2"
@@ -48,6 +48,7 @@ export VLLM_WORKER_MULTIPROC_METHOD="fork"
 # Profiling（配合 analysis/dynkv_profilers/ 解析 prefill.log）
 export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
 export VLLM_DYNKV_PROFILE_PREPARE=0
+# TTFT / offload rewrite：开 FORWARD=1 可看 [DynamicKV][offload_profile] rewrite_ms=
 export VLLM_DYNKV_PROFILE_FORWARD=0
 if [ "$dp_size" -gt 1 ]; then
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
@@ -84,7 +85,9 @@ vllm serve "$model_path" \
             "radio_max": 10.0,
             "min_rewrite_delta": 1,
             "pooling": "avgpool",
-            "kernel_size": 7
+            "kernel_size": 7,
+            "head_aggregation": "sum",
+            "uniform_kv_budget": "fixed_base"
         }
     }' \
     --kv-transfer-config \

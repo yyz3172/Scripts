@@ -1,6 +1,6 @@
 #!/bin/sh
-# Mistral-7B-Instruct-v0.2/1P2_1D2_dynamickv：单机 1 个 Decode（2 卡 TP=2）。与 run_prefill.sh 配套。
-# 在原 1P1_1D1 基础上开启 DynamicKV（--additional-config）。
+# Mistral-7B-Instruct-v0.2/1P2_1D2_dynamickv_pia：单机 1 个 Decode（2 卡 TP=2），PIA 路径（--enforce-eager + FIA）。
+# 与 run_prefill.sh 配套；DynamicKV 配置需与 PA 目录对齐（head_aggregation / uniform_kv_budget）。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
 model_path="/root/autodl-tmp/models/Mistral-7B-Instruct-v0.2"
@@ -46,11 +46,15 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
-# Profiling（配合 analysis/dynkv_profilers/ 解析 decode.log）
+# Profiling（配合 analysis/dynkv_profilers/ 解析 decode.log；parse_forward_profile 识别为 pia/pia_fia）
 export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
-export VLLM_DYNKV_PROFILE_PREPARE=0
+export VLLM_DYNKV_PROFILE_PREPARE=1
 export VLLM_DYNKV_PROFILE_FORWARD=1
-# 与 FORWARD=1 联用；FIA NPU 计时（32 sync/步，拖慢 forward，仅诊断）
+# PIA 为 eager FIA，勿开 PA graph NPU 计时
+export VLLM_DYNKV_PROFILE_PA=0
+# eager 下 model_acl 多为 0；若仍走 FULL graph 片段可开 1
+export VLLM_DYNKV_PROFILE_MODEL_ACL=0
+# 与 FORWARD=1 联用；FIA NPU 计时（32 sync/步，仅诊断，勿作 E2E 基线）
 export VLLM_DYNKV_PROFILE_FIA=0
 
 if [ "$dp_size" -gt 1 ]; then
@@ -89,7 +93,9 @@ vllm serve "$model_path" \
             "radio_max": 10.0,
             "min_rewrite_delta": 1,
             "pooling": "avgpool",
-            "kernel_size": 7
+            "kernel_size": 7,
+            "head_aggregation": "sum",
+            "uniform_kv_budget": "fixed_base"
         }
     }' \
     --kv-transfer-config \

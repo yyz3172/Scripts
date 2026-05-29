@@ -10,6 +10,7 @@
 | `parse_profile_execute_duration.py` | 解析 `ProfileExecuteDuration` 各阶段耗时；**prepare input 为 CPU wall**（与 `VLLM_DYNKV_PROFILE_PREPARE` 无关） | `VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1` |
 | `parse_dynkv_prepare_profile.py` | 解析 `_prepare_inputs` 阶段耗时（ON=DynamicKV 全字段；OFF=标准路径，DynKV 字段为 0） | `VLLM_DYNKV_PROFILE_PREPARE=1` |
 | `parse_forward_profile.py` | 解析 `forward` 阶段的耗时分解 | `VLLM_DYNKV_PROFILE_FORWARD=1`（可选 `FIA` / `PA`） |
+| `parse_offload_profile.py` | 解析 prefill 尾 **offload rewrite**：`rewrite_ms` / `finished_reqs` | `VLLM_DYNKV_PROFILE_FORWARD=1`（看 **prefill.log**） |
 | `parse_model_acl_profile.py` | 解析 `model_acl`（`_update_attn_pa_params`）细分 | `VLLM_DYNKV_PROFILE_MODEL_ACL=1` |
 
 ## 使用方法
@@ -77,6 +78,10 @@ python parse_dynkv_prepare_profile.py /path/to/decode.log
 # 解析 forward 阶段（树形缩进：model_attn_op 在 model_attn 下）
 python parse_forward_profile.py /path/to/decode.log
 
+# 解析 prefill offload rewrite（高并发 TTFT 诊断）
+python parse_offload_profile.py /path/to/prefill.log
+python parse_offload_profile.py /path/to/prefill.log --by-worker
+
 # 解析 model_acl（PA graph_task_update 细分）
 python parse_model_acl_profile.py /path/to/decode.log
 python parse_model_acl_profile.py decode_off.log decode_on.log
@@ -111,6 +116,25 @@ Profile execute duration: tag=post process, duration=0.55ms
 ```
 [DynamicKV][prepare_profile] dynkv=1 layers=32 stack_init=0.02ms kv_list_build=0.01ms build_helper=0.25ms broadcast=0.37ms stacked_tensor=0.04ms layer_ctx_fill_batch=0.50ms layer_copy_meta=0.31ms layer_slot_remap=1.85ms layer_meta_assign=0.59ms total_loop=2.75ms
 ```
+
+### `[DynamicKV][offload_profile]`（prefill，rewrite 分解）
+
+prefill 侧 ``VLLM_DYNKV_PROFILE_FORWARD=1``，仅在某个 engine step 有请求完成 prefill 时打印：
+
+```text
+[DynamicKV][offload_profile] rewrite_ms=4521.33 finished_reqs=3
+```
+
+| 字段 | 说明 |
+|------|------|
+| `rewrite_ms` | 本 step 调用 ``run_offload_rewrite_and_build_updates`` 墙钟（ms） |
+| `finished_reqs` | 本 step 完成 prefill、进入 rewrite 的请求数 |
+
+```bash
+python parse_offload_profile.py prefill.log
+```
+
+输出含 ``rewrite_ms`` / ``rewrite_ms_per_req`` 分位数、``finished_reqs`` 分布、``pile-up``（``finished_reqs>=2`` 占比）。
 
 ### `[DynamicKV][forward_profile]`
 

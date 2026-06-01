@@ -48,8 +48,8 @@ export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
 # Profiling（配合 analysis/dynkv_profilers/ 解析 decode.log；parse_forward_profile 识别为 pia/pia_fia）
 export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
-export VLLM_DYNKV_PROFILE_PREPARE=1
-export VLLM_DYNKV_PROFILE_FORWARD=1
+export VLLM_DYNKV_PROFILE_PREPARE=0
+export VLLM_DYNKV_PROFILE_FORWARD=0
 # PIA 为 eager FIA，勿开 PA graph NPU 计时
 export VLLM_DYNKV_PROFILE_PA=0
 # eager 下 model_acl 多为 0；若仍走 FULL graph 片段可开 1

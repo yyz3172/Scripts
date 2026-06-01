@@ -48,11 +48,11 @@ export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
 # Profiling（配合 analysis/dynkv_profilers/ 解析 decode.log）
 export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
-export VLLM_DYNKV_PROFILE_PREPARE=1
-export VLLM_DYNKV_PROFILE_FORWARD=1
+export VLLM_DYNKV_PROFILE_PREPARE=0
+export VLLM_DYNKV_PROFILE_FORWARD=0
 # PA graph replay NPU（仅诊断；每步 Event+sync，TPOT 会虚高 ~2ms，勿用于 E2E 基线）
 export VLLM_DYNKV_PROFILE_PA=0
-export VLLM_DYNKV_PROFILE_MODEL_ACL=1
+export VLLM_DYNKV_PROFILE_MODEL_ACL=0
 
 if [ "$dp_size" -gt 1 ]; then
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1

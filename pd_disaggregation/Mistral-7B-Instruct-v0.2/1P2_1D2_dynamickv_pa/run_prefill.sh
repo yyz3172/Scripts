@@ -1,6 +1,6 @@
 #!/bin/sh
-# Mistral-7B-Instruct-v0.2/1P1_1D1_dynamickv：单机 1 个 P（1 卡 TP=1）+ 1 个 D（1 卡 TP=1），共 2 卡。
-# 与 run_decode.sh 配套；在原 1P1_1D1 基础上开启 DynamicKV（--additional-config）。
+# Mistral-7B-Instruct-v0.2/1P2_1D2_dynamickv_pa：单机 1 个 P（2 卡 TP=2）+ 1 个 D（2 卡 TP=2），共 4 卡。
+# 与 run_decode.sh 配套；开启 DynamicKV（--additional-config）+ Ascend PyTorch Profiler（--profiler-config）。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
 model_path="/root/autodl-tmp/models/Mistral-7B-Instruct-v0.2"
@@ -45,10 +45,42 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
-# Profiling（配合 analysis/dynkv_profilers/ 解析 prefill.log）
+LOG_DIR="${LOG_DIR:-.}"
+mkdir -p "$LOG_DIR"
+
+# DynamicKV 日志 profiling（配合 analysis/dynkv_profilers/ 解析 prefill.log）
 export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
 export VLLM_DYNKV_PROFILE_PREPARE=0
 export VLLM_DYNKV_PROFILE_FORWARD=0
+
+# Ascend PyTorch Profiler（--profiler-config，见 service_profiling_guide）
+# 启停：curl -X POST http://${LOCAL_IP}:9000/start_profile|stop_profile
+# 分析：from torch_npu.profiler.profiler import analyse; analyse("${PROFILER_DIR}/localhost.*_ascend_pt/")
+ENABLE_TORCH_PROFILER="${ENABLE_TORCH_PROFILER:-1}"
+profiler_config_json=""
+if [ "$ENABLE_TORCH_PROFILER" = "1" ]; then
+  PROFILER_DIR="${PROFILER_DIR:-${LOG_DIR}/vllm_profile/prefill}"
+  mkdir -p "$PROFILER_DIR"
+  # vllm-ascend worker 仍从环境变量初始化 profiler，需与 --profiler-config 同步
+  export VLLM_TORCH_PROFILER_DIR="$PROFILER_DIR"
+  export VLLM_TORCH_PROFILER_WITH_STACK=0
+  export VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1
+  export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
+  # profiler: 分析器类型，"torch"=PyTorch/Ascend 算子级 trace；"cuda"=CUDA/NVTX（配合 Nsight）
+  # torch_profiler_dir: trace 落盘目录（需绝对路径；P/D 分离时 P/D 各设独立目录）
+  # torch_profiler_with_stack: 是否采集 Python 调用栈（true 数据量大、开销高，Ascend 文档建议 false）
+  # torch_profiler_record_shapes: 是否记录 tensor shape（true 增大 trace 体积）
+  # torch_profiler_with_memory: 是否记录内存占用（true 便于分析显存，采集时略增开销）
+  # ignore_frontend: 是否跳过 AsyncLLM 前端 CPU profiling（true 降低在线服务额外开销）
+  profiler_config_json='{
+    "profiler": "torch",
+    "torch_profiler_dir": "'"${PROFILER_DIR}"'",
+    "torch_profiler_with_stack": false,
+    "torch_profiler_record_shapes": false,
+    "torch_profiler_with_memory": true,
+    "ignore_frontend": true
+  }'
+fi
 if [ "$dp_size" -gt 1 ]; then
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 else
@@ -56,8 +88,10 @@ else
 fi
 run_prefill() {
 vllm serve "$model_path" \
+    ${profiler_config_json:+--profiler-config} \
+    ${profiler_config_json:+"$profiler_config_json"} \
     --host 0.0.0.0 \
-    --port $engine_port \
+    --port "$engine_port" \
     --enable-prefix-caching \
     --tensor-parallel-size 2 \
     --seed 1024 \
@@ -104,7 +138,5 @@ vllm serve "$model_path" \
     }'
 }
 
-LOG_DIR="${LOG_DIR:-.}"
-mkdir -p "$LOG_DIR"
 run_prefill >> "${LOG_DIR}/prefill.log" 2>&1
 

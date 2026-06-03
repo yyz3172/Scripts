@@ -75,7 +75,7 @@ run_one() {
     export TASK_QUEUE_ENABLE=1
     export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
-    # Profiling（配合 analysis/dynkv_profilers/ 解析 prefill_<rank>.log）
+    # DynamicKV 日志 profiling（配合 analysis/dynkv_profilers/ 解析 prefill_<rank>.log）
     export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
     export VLLM_DYNKV_PROFILE_PREPARE=0
     export VLLM_DYNKV_PROFILE_FORWARD=0
@@ -83,11 +83,39 @@ run_one() {
 
     LOG_DIR="${LOG_DIR:-.}"
     mkdir -p "$LOG_DIR"
+
+    # Ascend PyTorch Profiler（--profiler-config，见 service_profiling_guide）
+    # 启停：curl -X POST http://${LOCAL_IP}:${engine_port}/start_profile|stop_profile
+    # 分析：from torch_npu.profiler.profiler import analyse; analyse("${PROFILER_DIR}/localhost.*_ascend_pt/")
+    ENABLE_TORCH_PROFILER="${ENABLE_TORCH_PROFILER:-1}"
+    profiler_config_json=""
+    if [ "$ENABLE_TORCH_PROFILER" = "1" ]; then
+      PROFILER_DIR="${PROFILER_DIR:-${LOG_DIR}/vllm_profile/prefill_${prefill_rank}}"
+      mkdir -p "$PROFILER_DIR"
+      # vllm-ascend worker 仍从环境变量初始化 profiler，需与 --profiler-config 同步
+      export VLLM_TORCH_PROFILER_DIR="$PROFILER_DIR"
+      export VLLM_TORCH_PROFILER_WITH_STACK=0
+      export VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1
+      export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
+      # torch_profiler_record_shapes: 是否记录 tensor shape（true 增大 trace 体积）
+      # torch_profiler_with_memory: 是否记录内存占用（true 便于分析显存，采集时略增开销）
+      profiler_config_json='{
+        "profiler": "torch",
+        "torch_profiler_dir": "'"${PROFILER_DIR}"'",
+        "torch_profiler_with_stack": false,
+        "torch_profiler_record_shapes": false,
+        "torch_profiler_with_memory": true,
+        "ignore_frontend": true
+      }'
+    fi
+
     exec >> "${LOG_DIR}/prefill_${prefill_rank}.log" 2>&1
 
     vllm serve "$model_path" \
+        ${profiler_config_json:+--profiler-config} \
+        ${profiler_config_json:+"$profiler_config_json"} \
         --host 0.0.0.0 \
-        --port $engine_port \
+        --port "$engine_port" \
         --enable-prefix-caching \
         --tensor-parallel-size 2 \
         --seed 1024 \

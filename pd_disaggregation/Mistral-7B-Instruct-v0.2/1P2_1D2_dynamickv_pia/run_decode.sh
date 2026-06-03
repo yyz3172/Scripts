@@ -46,7 +46,10 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
-# Profiling（配合 analysis/dynkv_profilers/ 解析 decode.log；parse_forward_profile 识别为 pia/pia_fia）
+LOG_DIR="${LOG_DIR:-.}"
+mkdir -p "$LOG_DIR"
+
+# DynamicKV 日志 profiling（配合 analysis/dynkv_profilers/ 解析 decode.log；parse_forward_profile 识别为 pia/pia_fia）
 export VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1
 export VLLM_DYNKV_PROFILE_PREPARE=0
 export VLLM_DYNKV_PROFILE_FORWARD=0
@@ -57,18 +60,47 @@ export VLLM_DYNKV_PROFILE_MODEL_ACL=0
 # 与 FORWARD=1 联用；FIA NPU 计时（32 sync/步，仅诊断，勿作 E2E 基线）
 export VLLM_DYNKV_PROFILE_FIA=0
 
+# Ascend PyTorch Profiler（--profiler-config，见 service_profiling_guide）
+# 启停：curl -X POST http://${LOCAL_IP}:9010/start_profile|stop_profile
+# 分析：from torch_npu.profiler.profiler import analyse; analyse("${PROFILER_DIR}/localhost.*_ascend_pt/")
+ENABLE_TORCH_PROFILER="${ENABLE_TORCH_PROFILER:-1}"
+profiler_config_json=""
+if [ "$ENABLE_TORCH_PROFILER" = "1" ]; then
+  PROFILER_DIR="${PROFILER_DIR:-${LOG_DIR}/vllm_profile/decode}"
+  mkdir -p "$PROFILER_DIR"
+  # vllm-ascend worker 仍从环境变量初始化 profiler，需与 --profiler-config 同步
+  export VLLM_TORCH_PROFILER_DIR="$PROFILER_DIR"
+  export VLLM_TORCH_PROFILER_WITH_STACK=0
+  export VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1
+  export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
+  # profiler: 分析器类型，"torch"=PyTorch/Ascend 算子级 trace；"cuda"=CUDA/NVTX（配合 Nsight）
+  # torch_profiler_dir: trace 落盘目录（需绝对路径；P/D 分离时 P/D 各设独立目录）
+  # torch_profiler_with_stack: 是否采集 Python 调用栈（true 数据量大、开销高，Ascend 文档建议 false）
+  # torch_profiler_record_shapes: 是否记录 tensor shape（true 增大 trace 体积）
+  # torch_profiler_with_memory: 是否记录内存占用（true 便于分析显存，采集时略增开销）
+  # ignore_frontend: 是否跳过 AsyncLLM 前端 CPU profiling（true 降低在线服务额外开销）
+  profiler_config_json='{
+    "profiler": "torch",
+    "torch_profiler_dir": "'"${PROFILER_DIR}"'",
+    "torch_profiler_with_stack": false,
+    "torch_profiler_record_shapes": false,
+    "torch_profiler_with_memory": true,
+    "ignore_frontend": true
+  }'
+fi
+
 if [ "$dp_size" -gt 1 ]; then
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 else
   export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=0
 fi
-LOG_DIR="${LOG_DIR:-.}"
-mkdir -p "$LOG_DIR"
 exec >> "${LOG_DIR}/decode.log" 2>&1
 
 vllm serve "$model_path" \
+    ${profiler_config_json:+--profiler-config} \
+    ${profiler_config_json:+"$profiler_config_json"} \
     --host 0.0.0.0 \
-    --port $engine_port \
+    --port "$engine_port" \
     --tensor-parallel-size 2 \
     --nnodes 1 \
     --seed 1024 \

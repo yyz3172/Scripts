@@ -86,13 +86,13 @@ run_one() {
       mkdir -p "$PROFILER_DIR"
       export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
       # torch_profiler_record_shapes: 是否记录 tensor shape（true 增大 trace 体积）
-      # torch_profiler_with_memory: 是否记录内存占用（true 便于分析显存，采集时略增开销）
+      # torch_profiler_with_memory: 是否记录内存占用（false 缩短 analyse、减小 trace；看显存再改 true）
       profiler_config_json='{
         "profiler": "torch",
         "torch_profiler_dir": "'"${PROFILER_DIR}"'",
         "torch_profiler_with_stack": true,
         "torch_profiler_record_shapes": false,
-        "torch_profiler_with_memory": true,
+        "torch_profiler_with_memory": false,
         "ignore_frontend": true
       }'
     fi

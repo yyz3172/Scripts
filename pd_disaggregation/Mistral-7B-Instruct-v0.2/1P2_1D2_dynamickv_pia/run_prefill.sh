@@ -67,14 +67,14 @@ if [ "$ENABLE_TORCH_PROFILER" = "1" ]; then
   # torch_profiler_dir: trace 落盘目录（需绝对路径；P/D 分离时 P/D 各设独立目录）
   # torch_profiler_with_stack: 是否采集 Python 调用栈（true 数据量大、开销高）
   # torch_profiler_record_shapes: 是否记录 tensor shape（true 增大 trace 体积）
-  # torch_profiler_with_memory: 是否记录内存占用（true 便于分析显存，采集时略增开销）
+  # torch_profiler_with_memory: 是否记录内存占用（false 缩短 analyse、减小 trace；看显存再改 true）
   # ignore_frontend: 是否跳过 AsyncLLM 前端 CPU profiling（true 降低在线服务额外开销）
   profiler_config_json='{
     "profiler": "torch",
     "torch_profiler_dir": "'"${PROFILER_DIR}"'",
     "torch_profiler_with_stack": true,
     "torch_profiler_record_shapes": false,
-    "torch_profiler_with_memory": true,
+    "torch_profiler_with_memory": false,
     "ignore_frontend": true
   }'
 fi

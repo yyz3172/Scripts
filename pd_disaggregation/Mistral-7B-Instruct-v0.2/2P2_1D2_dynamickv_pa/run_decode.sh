@@ -63,17 +63,13 @@ profiler_config_json=""
 if [ "$ENABLE_TORCH_PROFILER" = "1" ]; then
   PROFILER_DIR="${PROFILER_DIR:-${LOG_DIR}/vllm_profile/decode}"
   mkdir -p "$PROFILER_DIR"
-  # vllm-ascend worker 仍从环境变量初始化 profiler，需与 --profiler-config 同步
-  export VLLM_TORCH_PROFILER_DIR="$PROFILER_DIR"
-  export VLLM_TORCH_PROFILER_WITH_STACK=0
-  export VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1
   export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
   # torch_profiler_record_shapes: 是否记录 tensor shape（true 增大 trace 体积）
   # torch_profiler_with_memory: 是否记录内存占用（true 便于分析显存，采集时略增开销）
   profiler_config_json='{
     "profiler": "torch",
     "torch_profiler_dir": "'"${PROFILER_DIR}"'",
-    "torch_profiler_with_stack": false,
+    "torch_profiler_with_stack": true,
     "torch_profiler_record_shapes": false,
     "torch_profiler_with_memory": true,
     "ignore_frontend": true

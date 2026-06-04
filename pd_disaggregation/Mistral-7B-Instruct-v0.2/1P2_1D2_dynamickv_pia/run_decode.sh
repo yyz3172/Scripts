@@ -68,21 +68,17 @@ profiler_config_json=""
 if [ "$ENABLE_TORCH_PROFILER" = "1" ]; then
   PROFILER_DIR="${PROFILER_DIR:-${LOG_DIR}/vllm_profile/decode}"
   mkdir -p "$PROFILER_DIR"
-  # vllm-ascend worker 仍从环境变量初始化 profiler，需与 --profiler-config 同步
-  export VLLM_TORCH_PROFILER_DIR="$PROFILER_DIR"
-  export VLLM_TORCH_PROFILER_WITH_STACK=0
-  export VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1
   export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
   # profiler: 分析器类型，"torch"=PyTorch/Ascend 算子级 trace；"cuda"=CUDA/NVTX（配合 Nsight）
   # torch_profiler_dir: trace 落盘目录（需绝对路径；P/D 分离时 P/D 各设独立目录）
-  # torch_profiler_with_stack: 是否采集 Python 调用栈（true 数据量大、开销高，Ascend 文档建议 false）
+  # torch_profiler_with_stack: 是否采集 Python 调用栈（true 数据量大、开销高）
   # torch_profiler_record_shapes: 是否记录 tensor shape（true 增大 trace 体积）
   # torch_profiler_with_memory: 是否记录内存占用（true 便于分析显存，采集时略增开销）
   # ignore_frontend: 是否跳过 AsyncLLM 前端 CPU profiling（true 降低在线服务额外开销）
   profiler_config_json='{
     "profiler": "torch",
     "torch_profiler_dir": "'"${PROFILER_DIR}"'",
-    "torch_profiler_with_stack": false,
+    "torch_profiler_with_stack": true,
     "torch_profiler_record_shapes": false,
     "torch_profiler_with_memory": true,
     "ignore_frontend": true

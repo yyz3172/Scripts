@@ -8,9 +8,9 @@
 VERSION=${1:-v0.13.0rc1}
 export IMAGE=quay.io/ascend/vllm-ascend:${VERSION}
 
-docker run --rm \
+docker run \
     --name vllm-ascend-yyz-${VERSION} \
-    --shm-size=10g \
+    --shm-size=64g \
     --net=host \
     --privileged \
     --device /dev/davinci_manager \
@@ -22,8 +22,10 @@ docker run --rm \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /mnt/paas/kubernetes/kubelet/huawei/yyz/.cache:/root/.cache \
-    -v /mnt/paas/kubernetes/kubelet/huawei/yyz:/root/yyz \
-    -v /mnt/paas/kubernetes/kubelet/huawei/xrx:/root/xrx \
+    -v /root/yyz/.cache:/root/.cache \
+    -v /root/yyz:/root/yyz \
+    -v /root/l00856060:/root/l00856060 \
     -v /root/autodl-tmp:/root/autodl-tmp \
+    -v /root/yyz/code/vllm-project/vllm:/vllm-workspace/vllm \
+    -v /root/yyz/code/vllm-project/vllm-ascend:/vllm-workspace/vllm-ascend \
     -it $IMAGE bash

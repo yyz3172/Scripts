@@ -179,7 +179,7 @@ class PdRuntimeConfig:
     """启动 PD 服务所需的最小运行时配置（与压测 batch 无关）。"""
 
     topo_dir: Path
-    vllm_venv: Path
+    vllm_venv: Optional[Path] = None
     pd_mode: str = ""
     prefill_port: int = 9000
     vllm_port: int = 9010
@@ -198,16 +198,37 @@ def pd_proxy_path(topo_dir: Path) -> Optional[Path]:
     return p if p.is_file() else None
 
 
+def _venv_activate_path(vllm_venv: Optional[Path]) -> Optional[Path]:
+    if vllm_venv is None:
+        return None
+    return vllm_venv / "bin" / "activate"
+
+
+def _shell_thread_env_fix() -> str:
+    return """
+# Some activate scripts (or cluster env) export invalid thread vars like "false",
+# which makes torch/torch_npu abort at import time. Force safe integers after
+# activating the venv.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+for k in OMP_NUM_THREADS MKL_NUM_THREADS OPENBLAS_NUM_THREADS; do
+  v="${!k}"
+  if [[ ! "$v" =~ ^[0-9]+$ ]]; then export "$k"=1; fi
+done
+"""
+
+
 def _bash_start_background(
     *,
     run_script: Path,
     log_file: Optional[Path],
     pid_file: Path,
-    venv_activate: Path,
+    venv_activate: Optional[Path],
     cwd: Path,
     extra_env: Optional[dict[str, str]] = None,
 ) -> None:
-    if not venv_activate.is_file():
+    if venv_activate is not None and not venv_activate.is_file():
         raise FileNotFoundError(f"venv activate 不存在: {venv_activate}")
     if not run_script.is_file():
         raise FileNotFoundError(f"入口不存在: {run_script}")
@@ -218,19 +239,12 @@ def _bash_start_background(
     else:
         raise ValueError(f"不支持的入口后缀: {run_script}")
     redir = f'>> "{log_file}" 2>&1' if log_file is not None else ""
+    activate_block = (
+        f'source "{venv_activate}"\n' if venv_activate is not None else ""
+    )
     inner = f"""
 set -euo pipefail
-source "{venv_activate}"
-# Some activate scripts (or cluster env) export invalid thread vars like "false",
-# which makes torch/torch_npu abort at import time. Force safe integers after
-# activating the venv.
-export OMP_NUM_THREADS="${{OMP_NUM_THREADS:-1}}"
-export MKL_NUM_THREADS="${{MKL_NUM_THREADS:-1}}"
-export OPENBLAS_NUM_THREADS="${{OPENBLAS_NUM_THREADS:-1}}"
-for k in OMP_NUM_THREADS MKL_NUM_THREADS OPENBLAS_NUM_THREADS; do
-  v="${{!k}}"
-  if [[ ! "$v" =~ ^[0-9]+$ ]]; then export "$k"=1; fi
-done
+{activate_block}{_shell_thread_env_fix()}
 set -m
 nohup {launcher} {redir} &
 echo $! > "{pid_file}"
@@ -471,7 +485,7 @@ class PdServiceCtl:
             run_script=run_script,
             log_file=None,
             pid_file=PID_PREFILL,
-            venv_activate=self._rt.vllm_venv / "bin" / "activate",
+            venv_activate=_venv_activate_path(self._rt.vllm_venv),
             cwd=self._rt.topo_dir,
             extra_env={
                 "LOG_DIR": str(log_dir),
@@ -486,8 +500,8 @@ class PdServiceCtl:
         env = os.environ.copy()
         env["LOG_DIR"] = str(log_dir)
         env.update(self._npu_iface_env())
-        activate = self._rt.vllm_venv / "bin" / "activate"
-        if not activate.is_file():
+        activate = _venv_activate_path(self._rt.vllm_venv)
+        if activate is not None and not activate.is_file():
             raise FileNotFoundError(f"venv activate 不存在: {self._rt.vllm_venv}")
         if run_script.suffix == ".py":
             launcher = f'python3 "{run_script}"'
@@ -495,10 +509,10 @@ class PdServiceCtl:
             launcher = f'bash "{run_script}"'
         else:
             raise ValueError(f"不支持的入口后缀: {run_script}")
+        activate_block = f'source "{activate}"\n' if activate is not None else ""
         inner = f"""
 set -euo pipefail
-source "{activate}"
-set -m
+{activate_block}set -m
 nohup {launcher} &
 echo $! > "{PID_DECODE}"
 """
@@ -520,7 +534,7 @@ echo $! > "{PID_DECODE}"
             run_script=proxy,
             log_file=log_dir / "proxy.log",
             pid_file=PID_PROXY,
-            venv_activate=self._rt.vllm_venv / "bin" / "activate",
+            venv_activate=_venv_activate_path(self._rt.vllm_venv),
             cwd=self._rt.topo_dir,
             extra_env={"LOCAL_IP": self._rt.local_ip},
         )
@@ -589,6 +603,11 @@ echo $! > "{PID_DECODE}"
 
         log_dir = log_dir.resolve()
         log_dir.mkdir(parents=True, exist_ok=True)
+        if self._rt.vllm_venv is None:
+            self._log("未指定 vllm_venv，prefill/decode/proxy 使用当前环境 PATH（不 source activate）")
+        else:
+            self._log(f"使用 vllm_venv: {self._rt.vllm_venv}")
+
         has_proxy = self.has_proxy_script
         if with_proxy is None:
             wp = has_proxy
@@ -712,8 +731,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     p_start.add_argument(
         "--vllm_venv",
         type=Path,
-        default=VLLM_VENV,
-        help="vLLM 所在虚拟环境目录（默认 /root/autodl-tmp/py_venv/vllm）",
+        default=None,
+        help=(
+            "vLLM 虚拟环境目录；指定则 source activate 后再启动。"
+            "未指定则使用当前 shell 环境（不进入虚拟环境）"
+        ),
     )
     p_start.add_argument(
         "--nic_name",
@@ -742,7 +764,7 @@ def _runtime_from_args(args: argparse.Namespace) -> PdRuntimeConfig:
     topo = (PKG_DIR / rel).resolve()
     return PdRuntimeConfig(
         topo_dir=topo,
-        vllm_venv=Path(args.vllm_venv).resolve(),
+        vllm_venv=Path(args.vllm_venv).resolve() if args.vllm_venv is not None else None,
         pd_mode=args.pd_mode,
         nic_name=args.nic_name,
         local_ip=args.local_ip,
@@ -755,7 +777,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.cmd == "stop":
         # 仅读写 /tmp/vllm_*.pid，不依赖拓扑目录；rt 占位满足构造即可。
         PdServiceCtl(
-            PdRuntimeConfig(topo_dir=PKG_DIR, vllm_venv=VLLM_VENV.resolve()),
+            PdRuntimeConfig(topo_dir=PKG_DIR),
             log=log_default,
         ).stop(use_proxy=True)
         return 0

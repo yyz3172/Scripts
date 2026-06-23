@@ -51,6 +51,7 @@ vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
     --enable-prefix-caching \
+    --enable-request-id-headers \
     --tensor-parallel-size 2 \
     --seed 1024 \
     --served-model-name qwen3_32b \
@@ -61,7 +62,7 @@ vllm serve "$model_path" \
     --long-prefill-token-threshold 1024 \
     --trust-remote-code \
     --enable-auto-tool-choice \
-    --tool-call-parser hermes \
+    --tool-call-parser llama3_json \
     --gpu-memory-utilization 0.9 \
     --enforce-eager \
     --kv-transfer-config \

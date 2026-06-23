@@ -63,6 +63,7 @@ run_one() {
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $engine_port \
+        --enable-request-id-headers \
         --tensor-parallel-size 2 \
         --nnodes 1 \
         --seed 1024 \
@@ -73,7 +74,7 @@ run_one() {
         --max-num-seqs 256 \
         --trust-remote-code \
         --enable-auto-tool-choice \
-        --tool-call-parser hermes \
+        --tool-call-parser llama3_json \
         --gpu-memory-utilization 0.9 \
         --enforce-eager \
         --kv-transfer-config \

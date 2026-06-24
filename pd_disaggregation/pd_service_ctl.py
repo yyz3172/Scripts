@@ -29,7 +29,7 @@ PID_PREFILL = Path("/tmp/vllm_prefill.pid")
 PID_DECODE = Path("/tmp/vllm_decode.pid")
 PID_PROXY = Path("/tmp/vllm_proxy.pid")
 
-VLLM_VENV = Path("/root/autodl-tmp/py_venv/vllm")
+VLLM_VENV = Path("/root/yyz/venv/vllm")
 
 _FALLBACK_NIC_NAME = "eth0"
 _FALLBACK_LOCAL_IP = "172.17.0.4"

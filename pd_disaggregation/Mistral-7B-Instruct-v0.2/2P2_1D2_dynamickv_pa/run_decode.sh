@@ -2,7 +2,7 @@
 # Mistral-7B-Instruct-v0.2/2P2_1D2_dynamickv_pa：1 个 Decode（2 卡 TP=2，卡 4,5）。与 run_prefill.sh 配套。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
-model_path="/root/autodl-tmp/models/Mistral-7B-Instruct-v0.2"
+model_path="/root/yyz/models/Mistral-7B-Instruct-v0.2"
 transfer_engine_lib_path="/usr/local/lib"
 python_lib_path="/root/.local/share/uv/python/cpython-3.11.15-linux-aarch64-gnu/lib"
 

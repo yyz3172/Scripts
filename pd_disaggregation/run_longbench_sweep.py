@@ -31,7 +31,7 @@ from pd_service_ctl import PdRuntimeConfig, PdServiceCtl
 PKG_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PKG_DIR.parent.parent
 
-VLLM_VENV = Path("/root/autodl-tmp/py_venv/vllm")
+VLLM_VENV = Path("/root/yyz/venv/vllm")
 LOG_ROOT = PKG_DIR / "logs"
 LOG_DIR_DEFAULT = LOG_ROOT / "longbench"
 LONGBENCH_DIR_DEFAULT = REPO_ROOT / "LongBench"

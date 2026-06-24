@@ -1,19 +1,23 @@
 #!/bin/sh
-# Qwen3-8B/1P1_2D1：单机 1 个 P（1 卡 TP=1）+ 2 个 D（各 1 卡 TP=1），共 3 卡，Qwen3-8B。
-# 与 run_decode.sh 配套；connector 中 decode dp_size=2, tp_size=1。
-# ========== 配置区 ==========
+# Qwen3.6-27B/1P4_1D4：单机 1 个 P（4 卡 TP=4）+ 1 个 D（4 卡 TP=4），共 8 卡，Qwen3.6-27B。
+# 与 run_decode.sh 配套；connector 中 decode dp_size=1, tp_size=4。
+# 相对 1P2_1D2，TP=4 降低单卡权重占用，适合 ~30GB 级 NPU。
+# Qwen3.6-27B 为 Qwen3_5 混合架构；PD + prefix caching 须用 MooncakeLayerwiseConnector
+# 并保留 hybrid KV cache manager（--no-disable-hybrid-kv-cache-manager）。
+# hybrid KV 下 get_block_ids 返回多组；PD D 侧须启用 recompute_scheduler（见 issue #7944）。
+# 勿设过小的 --long-prefill-token-threshold，须 >= mamba align 下的 block_size。
+# 日志：vllm 输出始终写入 ${LOG_DIR}/prefill.log；LOG_DIR 未设置时默认为当前目录（与 run_decode.sh 一致）。
 # NIC_NAME / LOCAL_IP 由 PdServiceCtl 注入；单独跑脚本时请 export，默认值与 pd_service_ctl 中常量一致。
 nic_name="${NIC_NAME:-eth0}"
 local_ip="${LOCAL_IP:-172.17.0.4}"
-model_path="/root/yyz/models/Qwen3-8B"
+model_path="/root/yyz/models/Qwen3.6-27B"
 transfer_engine_lib_path="/usr/local/lib"
 python_lib_path="/root/.local/share/uv/python/cpython-3.11.15-linux-aarch64-gnu/lib"
 dp_size=1
 dp_ip="127.0.0.1"
 dp_port=13395
 engine_port=9000
-visible_devices="0"
-# ==========================================
+visible_devices="0,1,2,3"
 
 export ASCEND_RT_VISIBLE_DEVICES=$visible_devices
 
@@ -31,8 +35,11 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
+# Qwen3.5/3.6 混合架构 + TP 多进程：须 OMP=1，fork+多线程会触发 Invalid thread pool
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
 export HCCL_BUFFSIZE=256
 
 export VLLM_DP_SIZE=$dp_size
@@ -44,7 +51,7 @@ export VLLM_DP_SIZE_LOCAL=1
 
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
-export VLLM_WORKER_MULTIPROC_METHOD="fork"
+export VLLM_WORKER_MULTIPROC_METHOD="spawn"
 export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
 
 run_prefill() {
@@ -52,32 +59,36 @@ vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $engine_port \
     --enable-prefix-caching \
-    --tensor-parallel-size 1 \
+    --mamba-cache-mode align \
+    --no-disable-hybrid-kv-cache-manager \
+    --enable-request-id-headers \
+    --tensor-parallel-size 4 \
     --seed 1024 \
-    --served-model-name qwen3_8b \
+    --served-model-name qwen3_6_27b \
     --dtype bfloat16 \
     --max-model-len 32768 \
     --max-num-batched-tokens 32768 \
     --max-num-seqs 256 \
-    --long-prefill-token-threshold 1024 \
+    --long-prefill-token-threshold 4096 \
     --trust-remote-code \
     --enable-auto-tool-choice \
-    --tool-call-parser hermes \
+    --tool-call-parser llama3_json \
     --gpu-memory-utilization 0.9 \
     --enforce-eager \
+    --additional-config '{"recompute_scheduler_enable": true}' \
     --kv-transfer-config \
     '{
-        "kv_connector": "MooncakeConnectorV1",
+        "kv_connector": "MooncakeLayerwiseConnector",
         "kv_buffer_device": "npu",
         "kv_role": "kv_producer",
         "kv_parallel_size": "1",
         "kv_port": "20001",
         "engine_id": "0",
         "kv_connector_extra_config": {
-            "prefill": { "dp_size": 1, "tp_size": 1 },
-            "decode": { "dp_size": 2, "tp_size": 1 }
+            "prefill": { "dp_size": 1, "tp_size": 4 },
+            "decode": { "dp_size": 1, "tp_size": 4 }
         },
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector"
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector"
     }'
 }
 

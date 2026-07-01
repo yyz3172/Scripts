@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 import time
@@ -11,6 +12,12 @@ from queue import Queue
 import sys
 
 
+CHAT_TIMEOUT = (1000, 2000)  # (连接超时, 读取超时)
+RELEASE_TIMEOUT = 1000
+
+
+_LOG_CTX = threading.local()
+
 
 class Logger:
     """简单的日志工具，同时输出到终端和文件"""
@@ -19,15 +26,37 @@ class Logger:
         self.log_file = log_file
         self.enable_file_log = enable_file_log
         self.file_handle = None
+        self._partial_line = ""
 
         if self.enable_file_log and self.log_file:
             self.file_handle = open(self.log_file, 'w', encoding='utf-8')
 
+    def _prefix(self) -> str:
+        tid = threading.get_ident()
+        sid = getattr(_LOG_CTX, "session_id", None) or "NO_SESSION"
+        return f"[T{tid}][{sid}] "
+
     def write(self, text):
-        sys.__stdout__.write(text)
-        if self.enable_file_log and self.file_handle:
-            self.file_handle.write(text)
-            self.file_handle.flush()
+        if not text:
+            return
+
+        data = self._partial_line + text
+        self._partial_line = ""
+
+        parts = data.splitlines(keepends=True)
+        out_chunks: list[str] = []
+        for part in parts:
+            if part.endswith("\n"):
+                out_chunks.append(self._prefix() + part)
+            else:
+                self._partial_line = part
+
+        if out_chunks:
+            out = "".join(out_chunks)
+            sys.__stdout__.write(out)
+            if self.enable_file_log and self.file_handle:
+                self.file_handle.write(out)
+                self.file_handle.flush()
 
     def flush(self):
         sys.__stdout__.flush()
@@ -256,7 +285,15 @@ def load_session_data(data_folder):
     return ordered_session_data
 
 
-def send_chat_request(messages, cache_salt=None, stream=True, max_tokens=5):
+def send_chat_request(
+    messages,
+    model,
+    chat_url,
+    cache_salt=None,
+    stream=True,
+    max_tokens=5,
+    cache_sharing=True,
+):
     """
     发送chat请求并返回TTFT、总时间和input_tokens
 
@@ -265,17 +302,17 @@ def send_chat_request(messages, cache_salt=None, stream=True, max_tokens=5):
         cache_salt: session id（新接口使用cache_salt替代session_id）
         stream: 是否流式响应
         max_tokens: 收集的最大token数
+        cache_sharing: 是否启用跨 session prefix cache 共享
     """
     req_data = {
-        "model": CONFIG["model"],
+        "model": model,
         "messages": messages,
         "stream": stream
     }
 
-    # 如果提供了cache_salt，则启用缓存共享
     if cache_salt is not None:
         req_data["cache_salt"] = cache_salt
-        req_data["cache_sharing"] = True
+        req_data["cache_sharing"] = cache_sharing
 
     headers = {
         "Content-Type": "application/json",
@@ -291,11 +328,11 @@ def send_chat_request(messages, cache_salt=None, stream=True, max_tokens=5):
 
     try:
         response = requests.post(
-            CONFIG["chat_url"],
+            chat_url,
             headers=headers,
             json=req_data,
             stream=stream,
-            timeout=CONFIG['chat_timeout']
+            timeout=CHAT_TIMEOUT
         )
         response.raise_for_status()
 
@@ -406,26 +443,32 @@ def send_chat_request(messages, cache_salt=None, stream=True, max_tokens=5):
         return total_time, total_time, None, False, start_time
 
 
-def send_release_request(messages, message_index_begin, cache_salt):
+def send_release_request(
+    messages,
+    message_index_begin,
+    cache_salt,
+    model,
+    release_url,
+    cache_sharing=True,
+):
     """
     发送release请求
 
     Args:
         messages: 消息列表
-        message_index_begin: 开始释放的消息索引
-        message_index_end: 结束释放的消息索引
+        message_index_begin: 开始释放的消息索引（0 表示从首条消息起释放）
         cache_salt: session id
+        cache_sharing: 是否启用跨 session prefix cache 共享
+
+    Returns:
+        (success, block_released): HTTP 是否成功，以及服务端返回的 block_released
     """
     release_data = {
-        "model": CONFIG["model"],
+        "model": model,
         "messages": messages,
         "messages_released_index": message_index_begin,
-        # "tools_released_index": 0,
-        # "tools": "",
-        # "tools_released_index": "",
-        # "message_index_end": message_index_end,
         "cache_salt": cache_salt,
-        "cache_sharing": True,
+        "cache_sharing": cache_sharing,
     }
     headers = {
         "Content-Type": "application/json",
@@ -434,76 +477,117 @@ def send_release_request(messages, message_index_begin, cache_salt):
     try:
         start = time.time()
         response = requests.post(
-            CONFIG["release_url"],
+            release_url,
             headers=headers,
             json=release_data,
-            timeout=CONFIG['release_timeout']
+            timeout=RELEASE_TIMEOUT
         )
         release_time = time.time() - start
-        print(f"[RELEASE] {cache_salt}: {release_time:.3f}s")
-        print(f"[RELEASE] response: {response.content}")
-        return response.status_code == 200
+        block_released = None
+        if response.status_code == 200:
+            try:
+                block_released = response.json().get("block_released")
+            except (json.JSONDecodeError, ValueError):
+                pass
+        release_log = (
+            f"[RELEASE] {release_time:.3f}s, "
+            f"cache_salt={cache_salt}, "
+            f"index={message_index_begin}, "
+            f"status={response.status_code}, "
+            f"block_released={block_released}"
+        )
+        if response.status_code != 200 or block_released is None:
+            release_log += f", response={response.content!r}"
+        print(release_log)
+        return response.status_code == 200, block_released
     except Exception as e:
-        print(f"Release请求失败 (cache_salt={cache_salt}): {e}")
-        return False
+        print(f"[RELEASE ERROR] 请求失败 (cache_salt={cache_salt}): {e}")
+        return False, None
+
+
+def compute_release_plan(prev_msgs, curr_msgs):
+    """
+    根据前后两轮 messages 判断是否需要 release，以及 messages_released_index。
+
+    Returns:
+        (should_release, message_index_begin)
+    """
+    if not prev_msgs:
+        return False, None
+
+    prev_len = len(prev_msgs)
+    curr_len = len(curr_msgs)
+
+    # - curr_msgs 为空：不触发中间 release（旧逻辑 should_release 保持 False）
+    # - 首条 message 发生变化（idx=0）：也不触发中间 release（旧逻辑 if msg_idx 跳过）
+    if curr_len == 0:
+        return False, None
+
+    for idx in range(min(prev_len, curr_len)):
+        if prev_msgs[idx] != curr_msgs[idx]:
+            print(f"  [RELEASE REASON] Message modified at index {idx}")
+            if idx == 0:
+                return False, None
+            return True, idx
+
+    return False, None
 
 
 
-def process_session(session_id, turns_data, metrics_collector, enable_release=True):
+def process_session(
+    session_id,
+    turns_data,
+    metrics_collector,
+    model,
+    chat_url,
+    release_url,
+    enable_release=True,
+    cache_sharing=True,
+):
     """处理单个session的所有turns（串行模式）"""
-    print(f"[{session_id}] 开始处理，共 {len(turns_data)} 轮, enable_release={enable_release}")
+    print(
+        f"开始处理，共 {len(turns_data)} 个对话轮次, "
+        f"enable_release={enable_release}, cache_sharing={cache_sharing}"
+    )
     prev_msgs = []
     for num, file_path, data in turns_data:
-        should_release = False
         curr_msgs = data.get('message', [])
-        if enable_release and (prev_msgs or curr_msgs):
-            prev_len = len(prev_msgs)
-            curr_len = len(curr_msgs)
-            if prev_len > 0:  # 只要前一轮有 messages，就需要设置 msg_idx
-                # 默认前缀相同，不需要释放
-                msg_idx = prev_len
-                if curr_len > 0:  # 当前轮也有 messages，比较前缀
-                    for idx in range(min(prev_len, curr_len)):
-                        ''' 一般来说当前messages比前一轮长.
-                        但是如果当前messages比前一轮短，也是可以从第一个不同考虑release。
-                        当当前message比前一轮短时，如果当前轮与前一轮的前半部分一样就没必要release'''
-                        if prev_msgs[idx] != curr_msgs[idx]:
-                            should_release = True
-                            msg_idx = idx  # 从第一个不同的消息开始释放
-                            print(f"  [RELEASE REASON] Message modified at index {idx}")
-                            break
-                else:  # 当前轮没有 messages（从有变无）
-                    # 前缀为空，算相同，不需要 release
-                    # 应对bug情况
-                    msg_idx = prev_len
-                    # should_release 保持 False
 
-        # 在发送当前请求前,先处理上一轮的release
-        if enable_release and should_release and prev_msgs is not None:
-            if msg_idx:
-                # 使用新接口的索引方式：message_index_begin 和 message_index_end
-                message_index_begin = msg_idx
+        # 在发送当前请求前，先按上一轮 messages 释放 KV
+        if enable_release and prev_msgs:
+            should_release, message_index_begin = compute_release_plan(
+                prev_msgs, curr_msgs
+            )
+            if should_release:
                 if message_index_begin >= len(prev_msgs):
-                    print(f"[WARN] {session_id} turn_{num}: "
-                          f"message_index_begin={message_index_begin} 超出范围 "
-                          f"(prev_messages长度={len(prev_msgs)})")
-                elif message_index_begin < len(prev_msgs):
-                    success = send_release_request(
+                    print(
+                        f"[WARN] {session_id} turn_{num}: "
+                        f"message_index_begin={message_index_begin} 超出范围 "
+                        f"(prev_messages长度={len(prev_msgs)})"
+                    )
+                else:
+                    success, block_released = send_release_request(
                         prev_msgs,
                         message_index_begin,
-                        session_id
+                        session_id,
+                        model,
+                        release_url,
+                        cache_sharing=cache_sharing,
                     )
                     if success:
-                        print(f"[{session_id}] release成功, turn:{num}, index_begin:{message_index_begin}")
+                        pass
                     else:
-                        print(f"[{session_id}] release失败")
+                        print("release失败")
 
         # 发送chat请求
         cache_salt = session_id if enable_release else None
-        print(f"发送第{num}轮chat msg")
+        print(f"发送第 {num} 个对话轮次 chat 请求")
         ttft, total_time, input_tokens, success, start_time, output_tokens = send_chat_request(
             curr_msgs,
-            cache_salt=cache_salt
+            model,
+            chat_url,
+            cache_salt=cache_salt,
+            cache_sharing=cache_sharing,
         )
 
         metrics_collector.add_metrics(
@@ -512,8 +596,34 @@ def process_session(session_id, turns_data, metrics_collector, enable_release=Tr
 
         prev_msgs = curr_msgs
 
+    # Session 所有对话轮次完成后，释放该 session 剩余 KV cache
+    if enable_release and prev_msgs:
+        success, block_released = send_release_request(
+            prev_msgs,
+            0,
+            session_id,
+            model,
+            release_url,
+            cache_sharing=cache_sharing,
+        )
+        if success:
+            print(
+                "session结束 release成功, "
+                f"index_begin:0, block_released:{block_released}"
+            )
+        else:
+            print("session结束 release失败")
 
-def worker_thread(task_queue, metrics_collector, enable_release):
+
+def worker_thread(
+    task_queue,
+    metrics_collector,
+    model,
+    chat_url,
+    release_url,
+    enable_release,
+    cache_sharing=True,
+):
     """工作线程 - 每个任务是一个完整的session"""
     while True:
         task = task_queue.get()
@@ -523,10 +633,21 @@ def worker_thread(task_queue, metrics_collector, enable_release):
 
         session_id, turns_data = task
         try:
-            process_session(session_id, turns_data, metrics_collector, enable_release)
+            _LOG_CTX.session_id = session_id
+            process_session(
+                session_id,
+                turns_data,
+                metrics_collector,
+                model,
+                chat_url,
+                release_url,
+                enable_release,
+                cache_sharing=cache_sharing,
+            )
         except Exception as e:
-            print(f"处理session {session_id} 时出错: {e}")
+            print(f"处理 session 时出错: {e}")
         finally:
+            _LOG_CTX.session_id = None
             task_queue.task_done()
 
 
@@ -545,37 +666,36 @@ def apply_session_limits(session_data, max_sessions=None, max_turns=None):
     return session_data
 
 
-def run_test(data_folder, num_threads=10, enable_release=True, max_sessions=None, max_turns=None):
+def run_test(
+    session_data,
+    model,
+    chat_url,
+    release_url,
+    num_threads=10,
+    enable_release=True,
+    cache_sharing=True,
+):
     """
     运行测试（串行模式）
 
     Args:
-        data_folder: 数据文件夹
+        session_data: 已加载并裁剪后的 session 数据
         num_threads: 并发线程数
         enable_release: 是否启用cache释放
-        max_sessions: 最大 session 数，None 表示使用全部 session
-        max_turns: 每个 session 最大对话轮次，None 表示使用全部轮次
+        cache_sharing: 是否启用跨 session prefix cache 共享
     """
     print(f"\n{'=' * 80}")
     print(f"测试配置:")
-    print(f"  数据文件夹: {data_folder}")
+    print(f"  Session数: {len(session_data)}")
+    print(f"  总对话轮次: {sum(len(turns) for turns in session_data.values())}")
     print(f"  并发线程数: {num_threads}")
     print(f"  测试模式: Session串行")
     print(f"  是否启用cache释放: {enable_release}")
+    if enable_release:
+        print(f"  cache_sharing: {cache_sharing}")
     if not enable_release:
         print(f"  注意: 不启用cache释放时，将不传入cache_salt")
-    print(f"  Session数量: {max_sessions or '全部'}")
-    print(f"  每Session轮次: {max_turns or '全部'}")
     print(f"{'=' * 80}\n")
-
-    session_data = load_session_data(data_folder)
-    total_turns_before = sum(len(turns) for turns in session_data.values())
-    session_data = apply_session_limits(session_data, max_sessions, max_turns)
-    total_turns_after = sum(len(turns) for turns in session_data.values())
-
-    if max_sessions or max_turns:
-        print(f"限制后: {len(session_data)} 个 session, 共 {total_turns_after} 轮请求 "
-              f"(原始 {total_turns_before} 轮)\n")
 
     metrics_collector = MetricsCollector()
     task_queue = Queue()
@@ -593,7 +713,15 @@ def run_test(data_folder, num_threads=10, enable_release=True, max_sessions=None
     for i in range(num_threads):
         t = threading.Thread(
             target=worker_thread,
-            args=(task_queue, metrics_collector, enable_release)
+            args=(
+                task_queue,
+                metrics_collector,
+                model,
+                chat_url,
+                release_url,
+                enable_release,
+                cache_sharing,
+            )
         )
         t.start()
         threads.append(t)
@@ -694,42 +822,77 @@ def save_report(summary_with_release, summary_without_release,
     print(f"  有释放: {summary_with_release['ttft_p99']:.3f}s")
     print(f"{'=' * 80}\n")
 
+def positive_int(value):
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"{value} 不是正整数")
+    return ivalue
+
+
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).lower()
+    if normalized in ("true", "1", "yes", "on"):
+        return True
+    if normalized in ("false", "0", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"{value!r} 不是合法布尔值，请使用 true/false"
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="KV cache affinity 压测与对比工具")
+    parser.add_argument("--url", default="10.41.38.238:8000", help="服务地址 host:port")
+    parser.add_argument("--model", default="qwen3_32b", help="模型名称")
+    parser.add_argument("--thread-num", type=int, default=1, help="并发线程数")
+    parser.add_argument(
+        "--repeat", type=positive_int, default=1,
+        help="flag=1/2 时整套测试重复执行次数，默认 1",
+    )
+    parser.add_argument("--max-session", type=int, default=None, help="Session 数量上限，默认全部")
+    parser.add_argument("--max-turns", type=int, default=None, help="每个 Session 的对话轮次上限，默认全部")
+    parser.add_argument("--output-report-json", default="compare.json", help="对比报告输出路径 (flag=3)")
+    parser.add_argument(
+        "--flag", type=int, choices=[1, 2, 3], default=1,
+        help="1=with_release, 2=without_release, 3=generate_report",
+    )
+    parser.add_argument(
+        "--input-dataset",
+        default="/root/xrx/l00444740_temp/msgs_50turn/",
+        help="输入数据集目录",
+    )
+    parser.add_argument("--log-dir", default="local_run_analysis", help="日志与 metrics 输出目录")
+    parser.add_argument("--metrics-with-release", help="with_release metrics 文件路径 (flag=3 必填)")
+    parser.add_argument("--metrics-without-release", help="without_release metrics 文件路径 (flag=3 必填)")
+    parser.add_argument(
+        "--cache-sharing",
+        type=str_to_bool,
+        default=True,
+        help="是否启用跨 session prefix cache 共享 (true/false)，默认 true",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    URL = '10.41.38.238:8000'
+    args = parse_args()
 
-    # 配置
-    CONFIG = {
-        'chat_url': f'http://{URL}/v1/chat/completions',
-        'release_url': f'http://{URL}/release_kv_cache',
+    model = args.model
+    chat_url = f"http://{args.url}/v1/chat/completions"
+    release_url = f"http://{args.url}/release_kv_cache"
 
-        # 模型
-        'model': 'qwen3_32b',
-
-        "thread_num": 1,  # 并发线程数
-        "max_session": 1,  # Session 数量上限，None 表示全部
-        "max_turns": 5,  # 每个 Session 的对话轮次上限，None 表示全部
-        "output_report_json": "compare.json",
-        "flag": 1,  # 1=with_release, 2=without_release, 3=generate_report
-
-        "input_dataset": "/root/xrx/l00444740_temp/msgs_50turn/",
-        "log_dir": "local_run_analysis_1223_56session_8B",
-
-        # 超时配置
-        "chat_timeout": (1000, 2000),  # (连接超时, 读取超时)
-        "release_timeout": 1000,
-    }
-
-    log_dir = CONFIG["log_dir"]
+    log_dir = args.log_dir
     os.makedirs(log_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    input_file = CONFIG["input_dataset"]
-    input_name = input_file.split("/")[-1]
+    input_file = args.input_dataset
+    input_name = input_file.rstrip("/").split("/")[-1]
 
-    flag = CONFIG["flag"]
-    TN = CONFIG["thread_num"]
-    MS = CONFIG["max_session"]
-    MT = CONFIG["max_turns"]
+    flag = args.flag
+    TN = args.thread_num
+    MS = args.max_session
+    MT = args.max_turns
     ms_tag = MS if MS is not None else "all"
     mt_tag = MT if MT is not None else "all"
 
@@ -742,53 +905,95 @@ if __name__ == "__main__":
         print(f"{'=' * 80}\n")
 
         if flag == 1:
-            print("执行阶段1: 启用cache释放测试")
+            print(f"执行阶段1: 启用cache释放测试 (重复执行 {args.repeat} 次)")
             print("=" * 80)
-            summary_with, metrics_with = run_test(
-                input_file,
-                num_threads=CONFIG["thread_num"],
-                enable_release=True,
-                max_sessions=CONFIG["max_session"],
-                max_turns=CONFIG["max_turns"],
-            )
 
-            metrics_file = os.path.join(log_dir,
-                                        f"metrics_with_release_TN{TN}_MS{ms_tag}_MT{mt_tag}_{timestamp}.json")
-            save_metrics(summary_with, metrics_with, metrics_file)
+            session_data = load_session_data(input_file)
+            total_turns_before = sum(len(turns) for turns in session_data.values())
+            session_data = apply_session_limits(session_data, args.max_session, args.max_turns)
+            total_turns_after = sum(len(turns) for turns in session_data.values())
+            if args.max_session or args.max_turns:
+                print(f"限制后: {len(session_data)} 个 session, 共 {total_turns_after} 个对话轮次 "
+                      f"(原始 {total_turns_before} 个)\n")
+
+            for run_idx in range(1, args.repeat + 1):
+                if args.repeat > 1:
+                    print(f"\n--- 第 {run_idx}/{args.repeat} 次重复 ---\n")
+                summary_with, metrics_with = run_test(
+                    session_data,
+                    model,
+                    chat_url,
+                    release_url,
+                    num_threads=args.thread_num,
+                    enable_release=True,
+                    cache_sharing=args.cache_sharing,
+                )
+
+                if args.repeat == 1:
+                    run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    metrics_file = os.path.join(
+                        log_dir,
+                        f"metrics_with_release_TN{TN}_MS{ms_tag}_MT{mt_tag}_{run_timestamp}.json",
+                    )
+                    save_metrics(summary_with, metrics_with, metrics_file)
 
             print("\n" + "=" * 80)
             print("阶段1完成！")
-            print("=" * 80)
-            print("\n请按以下步骤继续:")
-            print("1. 重启vLLM服务以清除cache")
-            print("2. 修改代码中的 flag=2")
-            print("3. 重新运行此脚本")
-            print("=" * 80 + "\n")
+            print("\n" + "=" * 80)
 
         elif flag == 2:
-            print("执行阶段2: 不启用cache释放测试")
+            print(f"执行阶段2: 不启用cache释放测试 (重复执行 {args.repeat} 次)")
             print("=" * 80)
             print("请确认已重启vLLM服务清除cache！")
             print("本阶段将不传入cache_salt，避免session管理的影响")
             print("=" * 80 + "\n")
 
-            summary_without, metrics_without = run_test(
-                input_file,
-                num_threads=CONFIG["thread_num"],
-                enable_release=False,
-                max_sessions=CONFIG["max_session"],
-                max_turns=CONFIG["max_turns"],
-            )
+            session_data = load_session_data(input_file)
+            total_turns_before = sum(len(turns) for turns in session_data.values())
+            session_data = apply_session_limits(session_data, args.max_session, args.max_turns)
+            total_turns_after = sum(len(turns) for turns in session_data.values())
+            if args.max_session or args.max_turns:
+                print(f"限制后: {len(session_data)} 个 session, 共 {total_turns_after} 个对话轮次 "
+                      f"(原始 {total_turns_before} 个)\n")
 
-            metrics_file = os.path.join(log_dir,
-                                        f"metrics_without_release_TN{TN}_MS{ms_tag}_MT{mt_tag}_{timestamp}.json")
-            save_metrics(summary_without, metrics_without, metrics_file)
+            for run_idx in range(1, args.repeat + 1):
+                if args.repeat > 1:
+                    print(f"\n--- 第 {run_idx}/{args.repeat} 次重复 ---\n")
+                summary_without, metrics_without = run_test(
+                    session_data,
+                    model,
+                    chat_url,
+                    release_url,
+                    num_threads=args.thread_num,
+                    enable_release=False,
+                )
+
+                if args.repeat == 1:
+                    run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    metrics_file = os.path.join(
+                        log_dir,
+                        f"metrics_without_release_TN{TN}_MS{ms_tag}_MT{mt_tag}_{run_timestamp}.json",
+                    )
+                    save_metrics(summary_without, metrics_without, metrics_file)
 
             print("\n" + "=" * 80)
             print("阶段2完成！")
+            print("\n" + "=" * 80)
+
+        elif flag == 3:
+            if not args.metrics_with_release or not args.metrics_without_release:
+                print("错误: flag=3 需要同时指定 --metrics-with-release 和 --metrics-without-release")
+                sys.exit(1)
+
+            print("执行阶段3: 生成对比报告")
             print("=" * 80)
-            print("\n请按以下步骤继续:")
-            print("1. 修改代码中的 flag=3")
-            print("2. 更新 WITH_RELEASE_FILE 和 WITHOUT_RELEASE_FILE 路径")
-            print("3. 重新运行此脚本生成对比报告")
-            print("=" * 80 + "\n")
+            summary_with, metrics_with, summary_without, metrics_without = load_metrics(
+                args.metrics_with_release,
+                args.metrics_without_release,
+            )
+            save_report(
+                summary_with, summary_without,
+                metrics_with, metrics_without,
+                output_file=args.output_report_json,
+            )
+            print("阶段3完成！")

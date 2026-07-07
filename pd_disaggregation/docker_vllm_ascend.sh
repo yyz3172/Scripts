@@ -24,6 +24,7 @@ docker run \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /root/yyz/.cache:/root/.cache \
     -v /root/yyz:/root/yyz \
+    -v /root/xrx:/root/xrx \
     -v /root/l00856060:/root/l00856060 \
     -v /root/autodl-tmp:/root/autodl-tmp \
     -v /root/yyz/code/vllm-project/vllm:/vllm-workspace/vllm \
